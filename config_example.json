@@ -126,5 +126,12 @@
     "allow_origins": [
       "*"
     ]
-  }
+  },
+  "concurrent_play_limit_enabled": false,
+  "concurrent_play_limit": 2,
+  "concurrent_play_warn_threshold": 3,
+  "concurrent_play_check_interval": 60,
+  "tracearr_enabled": false,
+  "tracearr_url": null,
+  "tracearr_api_key": null
 }

@@ -1,0 +1,60 @@
+site_name: Wiki For Emby bot
+site_description: Emby Bot 指南
+site_author: First Lover
+site_url: https://berry8838.github.io/Sakura_embyboss/
+
+repo_name: berry8838/Sakura_embyboss
+repo_url: https://github.com/berry8838/Sakura_embyboss
+edit_uri: edit/master/docs/
+
+copyright: Copyright &copy; 2024 First Lover
+
+theme:
+  name: material
+  language: zh
+  palette:
+    - scheme: default
+      primary: deep-purple
+      accent: deep-orange
+      toggle:
+        icon: material/brightness-7
+        name: 切换夜间模式
+    - scheme: slate
+      primary: black
+      accent: deep-orange
+      toggle:
+        icon: material/brightness-4
+        name: 切换日间模式
+  features:
+    - navigation.tabs
+    - navigation.sections
+    - navigation.expand
+    - search.suggest
+    - search.highlight
+  favicon: assets/images/favicon.ico
+  logo: assets/images/bot2.png
+
+extra_css:
+  - css/timeago.css
+  - stylesheets/extra.css
+
+markdown_extensions:
+  - admonition
+  - pymdownx.details
+  - pymdownx.superfences
+  - pymdownx.tabbed:
+      alternate_style: true
+  - tables
+  - toc:
+      permalink: true
+
+nav:
+  - Home: index.md
+  - 简介: show.md
+  - 如何部署: deploy/introduce.md
+  - 使用帮助:
+      - 用户功能: Helper.md
+      - 同时播放限制: Concurrent_Play_Limit.md
+      - Tracearr 对接: Tracearr_Integration.md
+  - 配置说明: Config_Example.md
+  - 特别感谢: thanks.md

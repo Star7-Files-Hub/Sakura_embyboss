@@ -876,3 +876,270 @@ async def set_client_filter_mode(_, call):
     save_config()
     await set_client_filter_panel(_, call)
     LOGGER.info(log_message)
+
+
+# ============================================================
+# 同时播放限制设置
+# ============================================================
+
+def concurrent_play_limit_panel() -> InlineKeyboardMarkup:
+    """同时播放限制设置面板按钮"""
+    cpl_enabled = '✅' if config.concurrent_play_limit_enabled else '❎'
+    keyboard = ikb([
+        [(f'{cpl_enabled} 同时播放限制', 'toggle_concurrent_play_limit')],
+        [(f'设置播放限制数({config.concurrent_play_limit}个)', 'set_concurrent_play_limit_count')],
+        [(f'设置警告阈值({config.concurrent_play_warn_threshold}次)', 'set_concurrent_play_warn_threshold')],
+        [(f'设置检测间隔({config.concurrent_play_check_interval}秒)', 'set_concurrent_play_check_interval')],
+        [('🔄 重置所有警告计数', 'reset_concurrent_warn_counts')],
+        [('🔙 返回', 'back_config')],
+    ])
+    return keyboard
+
+
+@bot.on_callback_query(filters.regex('^set_concurrent_play_limit$') & admins_on_filter)
+async def set_concurrent_play_limit_panel(_, call):
+    """进入同时播放限制设置子面板"""
+    await callAnswer(call, '🎬 同时播放限制')
+    status = '✅ 已开启' if config.concurrent_play_limit_enabled else '❌ 未开启'
+    text = (
+        f"🎬 **同时播放限制设置**\n\n"
+        f"当前状态: **{status}**\n"
+        f"播放限制: **{config.concurrent_play_limit}** 个流/人\n"
+        f"警告阈值: **{config.concurrent_play_warn_threshold}** 次\n"
+        f"检测间隔: **{config.concurrent_play_check_interval}** 秒\n\n"
+        f"• 当用户同时播放流超过限制时，将终止所有流并警告\n"
+        f"• 超过警告阈值将自动封禁账号\n"
+        f"• 违规事件将在群内通报"
+    )
+    await editMessage(call, text, buttons=concurrent_play_limit_panel())
+
+
+@bot.on_callback_query(filters.regex('^toggle_concurrent_play_limit$') & admins_on_filter)
+async def toggle_concurrent_play_limit(_, call):
+    """切换同时播放限制开关"""
+    config.concurrent_play_limit_enabled = not config.concurrent_play_limit_enabled
+    if config.concurrent_play_limit_enabled:
+        message = '🎬 您已开启 同时播放限制功能'
+        log_message = f"【admin】：管理员 {call.from_user.first_name} 已开启 同时播放限制功能"
+        # 启动定时任务
+        from bot.func_helper.scheduler import scheduler
+        from bot.modules.extra.concurrent_play_monitor import check_concurrent_play_limit
+        interval = config.concurrent_play_check_interval
+        scheduler.add_job(check_concurrent_play_limit, 'interval', seconds=interval, id='concurrent_play_check')
+    else:
+        message = '🎬 您已关闭 同时播放限制功能'
+        log_message = f"【admin】：管理员 {call.from_user.first_name} 已关闭 同时播放限制功能"
+        # 移除定时任务
+        from bot.func_helper.scheduler import scheduler
+        try:
+            scheduler.remove_job(job_id='concurrent_play_check')
+        except Exception:
+            pass
+    await callAnswer(call, message, True)
+    save_config()
+    await set_concurrent_play_limit_panel(_, call)
+    LOGGER.info(log_message)
+
+
+@bot.on_callback_query(filters.regex('^set_concurrent_play_limit_count$') & admins_on_filter)
+async def set_concurrent_play_limit_count(_, call):
+    """设置同时播放限制数"""
+    await callAnswer(call, '📌 设置播放限制数')
+    send = await editMessage(call,
+                             f"🎬【设置同时播放限制数】\n\n"
+                             f"当前限制: **{config.concurrent_play_limit}** 个流\n"
+                             f"请输入一个数字（每人允许的同时播放流数量）\n"
+                             f"取消点击 /cancel")
+    if send is False:
+        return
+    txt = await callListen(call, 120, back_config_p_ikb)
+    if txt is False:
+        return
+    if txt.text.strip() == '/cancel':
+        await txt.delete()
+        return await set_concurrent_play_limit_panel(_, call)
+    await txt.delete()
+    try:
+        count = int(txt.text)
+        if count <= 0:
+            raise ValueError
+    except ValueError:
+        await editMessage(call, "❌ 请输入大于0的数字", buttons=back_config_p_ikb)
+        return await set_concurrent_play_limit_panel(_, call)
+    config.concurrent_play_limit = count
+    save_config()
+    await editMessage(call, f"✅ 播放限制已设置为 **{count}** 个流", buttons=back_config_p_ikb)
+    LOGGER.info(f"【admin】：{call.from_user.id} - 更新同时播放限制数为{count}")
+    await set_concurrent_play_limit_panel(_, call)
+
+
+@bot.on_callback_query(filters.regex('^set_concurrent_play_warn_threshold$') & admins_on_filter)
+async def set_concurrent_play_warn_threshold(_, call):
+    """设置警告阈值"""
+    await callAnswer(call, '📌 设置警告阈值')
+    send = await editMessage(call,
+                             f"🎬【设置警告阈值】\n\n"
+                             f"当前阈值: **{config.concurrent_play_warn_threshold}** 次\n"
+                             f"请输入一个数字（超过此次数将自动封禁）\n"
+                             f"取消点击 /cancel")
+    if send is False:
+        return
+    txt = await callListen(call, 120, back_config_p_ikb)
+    if txt is False:
+        return
+    if txt.text.strip() == '/cancel':
+        await txt.delete()
+        return await set_concurrent_play_limit_panel(_, call)
+    await txt.delete()
+    try:
+        count = int(txt.text)
+        if count <= 0:
+            raise ValueError
+    except ValueError:
+        await editMessage(call, "❌ 请输入大于0的数字", buttons=back_config_p_ikb)
+        return await set_concurrent_play_limit_panel(_, call)
+    config.concurrent_play_warn_threshold = count
+    save_config()
+    await editMessage(call, f"✅ 警告阈值已设置为 **{count}** 次", buttons=back_config_p_ikb)
+    LOGGER.info(f"【admin】：{call.from_user.id} - 更新警告阈值为{count}")
+    await set_concurrent_play_limit_panel(_, call)
+
+
+@bot.on_callback_query(filters.regex('^set_concurrent_play_check_interval$') & admins_on_filter)
+async def set_concurrent_play_check_interval(_, call):
+    """设置检测间隔"""
+    await callAnswer(call, '📌 设置检测间隔')
+    send = await editMessage(call,
+                             f"🎬【设置检测间隔】\n\n"
+                             f"当前间隔: **{config.concurrent_play_check_interval}** 秒\n"
+                             f"请输入一个数字（检测周期，建议30-300秒）\n"
+                             f"取消点击 /cancel")
+    if send is False:
+        return
+    txt = await callListen(call, 120, back_config_p_ikb)
+    if txt is False:
+        return
+    if txt.text.strip() == '/cancel':
+        await txt.delete()
+        return await set_concurrent_play_limit_panel(_, call)
+    await txt.delete()
+    try:
+        seconds = int(txt.text)
+        if seconds < 10:
+            raise ValueError
+    except ValueError:
+        await editMessage(call, "❌ 请输入大于等于10的数字", buttons=back_config_p_ikb)
+        return await set_concurrent_play_limit_panel(_, call)
+    config.concurrent_play_check_interval = seconds
+    save_config()
+    # 如果功能已开启，重启定时任务
+    if config.concurrent_play_limit_enabled:
+        from bot.func_helper.scheduler import scheduler
+        from bot.modules.extra.concurrent_play_monitor import check_concurrent_play_limit
+        try:
+            scheduler.remove_job(job_id='concurrent_play_check')
+        except Exception:
+            pass
+        scheduler.add_job(check_concurrent_play_limit, 'interval', seconds=seconds, id='concurrent_play_check')
+    await editMessage(call, f"✅ 检测间隔已设置为 **{seconds}** 秒", buttons=back_config_p_ikb)
+    LOGGER.info(f"【admin】：{call.from_user.id} - 更新检测间隔为{seconds}秒")
+    await set_concurrent_play_limit_panel(_, call)
+
+
+@bot.on_callback_query(filters.regex('^reset_concurrent_warn_counts$') & admins_on_filter)
+async def reset_concurrent_warn_counts_callback(_, call):
+    """重置所有警告计数"""
+    await callAnswer(call, '🔄 正在重置')
+    from bot.modules.extra.concurrent_play_monitor import reset_all_warn_counts
+    ok = await reset_all_warn_counts()
+    if ok:
+        await editMessage(call, "✅ 已重置所有用户的同时播放警告计数", buttons=back_config_p_ikb)
+        LOGGER.info(f"【admin】：{call.from_user.id} - 重置所有警告计数")
+    else:
+        await editMessage(call, "❌ 重置失败", buttons=back_config_p_ikb)
+    await set_concurrent_play_limit_panel(_, call)
+
+
+# ============================================================
+# Tracearr 对接设置
+# ============================================================
+
+def tracearr_panel() -> InlineKeyboardMarkup:
+    """Tracearr 设置面板按钮"""
+    te_enabled = '✅' if config.tracearr_enabled else '❎'
+    keyboard = ikb([
+        [(f'{te_enabled} Tracearr对接', 'toggle_tracearr')],
+        [('📝 设置Tracearr参数', 'set_tracearr_params')],
+        [('🔙 返回', 'back_config')],
+    ])
+    return keyboard
+
+
+@bot.on_callback_query(filters.regex('^set_tracearr$') & admins_on_filter)
+async def set_tracearr_panel(_, call):
+    """进入 Tracearr 设置子面板"""
+    await callAnswer(call, '📡 Tracearr 对接')
+    status = '✅ 已开启' if config.tracearr_enabled else '❌ 未开启'
+    url_display = config.tracearr_url or '未设置'
+    key_display = f"{config.tracearr_api_key[:10]}..." if config.tracearr_api_key and len(config.tracearr_api_key) > 10 else (config.tracearr_api_key or '未设置')
+    text = (
+        f"📡 **Tracearr 对接设置**\n\n"
+        f"当前状态: **{status}**\n"
+        f"Tracearr URL: `{url_display}`\n"
+        f"API Key: `{key_display}`\n\n"
+        f"• Tracearr 可用于会话监控和流终止\n"
+        f"• 注意：Tracearr 要求客户端支持远程控制才能终止流\n"
+        f"• EmbyBoss 的终止方式不受此限制"
+    )
+    await editMessage(call, text, buttons=tracearr_panel())
+
+
+@bot.on_callback_query(filters.regex('^toggle_tracearr$') & admins_on_filter)
+async def toggle_tracearr(_, call):
+    """切换 Tracearr 对接开关"""
+    config.tracearr_enabled = not config.tracearr_enabled
+    if config.tracearr_enabled:
+        message = '📡 您已开启 Tracearr 对接'
+        log_message = f"【admin】：管理员 {call.from_user.first_name} 已开启 Tracearr 对接"
+    else:
+        message = '📡 您已关闭 Tracearr 对接'
+        log_message = f"【admin】：管理员 {call.from_user.first_name} 已关闭 Tracearr 对接"
+    await callAnswer(call, message, True)
+    save_config()
+    await set_tracearr_panel(_, call)
+    LOGGER.info(log_message)
+
+
+@bot.on_callback_query(filters.regex('^set_tracearr_params$') & admins_on_filter)
+async def set_tracearr_params(_, call):
+    """设置 Tracearr 参数"""
+    await callAnswer(call, '📝 设置Tracearr参数')
+    send = await editMessage(call,
+                             f"【设置 Tracearr 参数】\n\n"
+                             f"请依次输入 Tracearr 地址和 API Key，用换行隔开：\n"
+                             f"**https://tracearr.example.com\nyour-api-key**\n\n"
+                             f"取消点击 /cancel")
+    if send is False:
+        return
+    txt = await callListen(call, 120, back_config_p_ikb)
+    if txt is False:
+        return
+    if txt.text.strip() == '/cancel':
+        await txt.delete()
+        return await set_tracearr_panel(_, call)
+    await txt.delete()
+    try:
+        lines = txt.text.strip().split('\n')
+        url = lines[0].strip()
+        api_key = lines[1].strip() if len(lines) > 1 else ''
+        if not url:
+            raise ValueError("URL不能为空")
+    except (IndexError, ValueError) as e:
+        await editMessage(call, f"❌ 格式错误: {str(e)}", buttons=back_config_p_ikb)
+        return await set_tracearr_panel(_, call)
+    config.tracearr_url = url
+    config.tracearr_api_key = api_key
+    save_config()
+    await editMessage(call, f"✅ Tracearr 参数设置完成\nURL: `{url}`", buttons=back_config_p_ikb)
+    LOGGER.info(f"【admin】：{call.from_user.id} - 更新Tracearr参数")
+    await set_tracearr_panel(_, call)

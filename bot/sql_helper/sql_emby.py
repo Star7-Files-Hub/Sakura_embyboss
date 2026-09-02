@@ -25,6 +25,7 @@ class Emby(Base):
     us = Column(Integer, default=0)
     iv = Column(Integer, default=0)
     ch = Column(DateTime, nullable=True)
+    concurrent_warn_count = Column(Integer, default=0)
 
 def sql_add_emby(tg: int):
     """

@@ -206,6 +206,15 @@ class Config(BaseModel):
     line_filter_block_user: bool = False
     # 分区名 -> 库名列表
     partition_libs: Dict[str, List[str]] = Field(default_factory=dict)
+    # 同时播放限制检测
+    concurrent_play_limit_enabled: bool = False
+    concurrent_play_limit: int = 2
+    concurrent_play_warn_threshold: int = 3
+    concurrent_play_check_interval: int = 60
+    # Tracearr 对接
+    tracearr_enabled: bool = False
+    tracearr_url: Optional[str] = None
+    tracearr_api_key: Optional[str] = None
     moviepilot: MP = Field(default_factory=MP)
     auto_update: AutoUpdate = Field(default_factory=AutoUpdate)
     red_envelope: RedEnvelope = Field(default_factory=RedEnvelope)
