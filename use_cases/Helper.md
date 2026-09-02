@@ -1,5 +1,9 @@
 # 使用帮助
 
+[← 返回首页](../index.md)
+
+---
+
 ## 用户功能
 
 ### 换绑与绑定的区别
@@ -27,8 +31,6 @@
 
 把后台 `api_token` 拿到，然后在 `config.json` 输入要监控的 id。
 
-如图，向列表 `[]` 里面加入数字 id 即可。
-
 ---
 
 ## 管理按钮 - 定时任务
@@ -45,8 +47,6 @@
 
 - **名称**：随便填，例如：favorites
 - **URL**：`http://192.168.2.147:8838/emby/webhook/favorites?token=这里填入bot的token`
-  - 将 IP 地址和端口替换成自己 bot 所在的地址和端口
-  - token 填入 bot 的 token
 - **事件类型**：选中"添加到'最爱'"、"从'最爱'中移除"
 
 ### 添加第二个 Webhook（媒体更新推送）
@@ -81,6 +81,8 @@
 3. 在群内通报违规事件
 4. 超过警告次数自动封禁账号
 
+详细说明请查看：[同时播放限制检测](Concurrent_Play_Limit.md)
+
 ### 配置方法
 
 在 `config.json` 中添加：
@@ -89,26 +91,12 @@
 {
   "concurrent_play_limit_enabled": true,
   "concurrent_play_limit": 2,
-  "concurrent_play_warn_threshold": 3,
-  "concurrent_play_check_interval": 60
+  "concurrent_play_limit_warn_threshold": 3,
+  "concurrent_play_limit_check_interval": 60
 }
 ```
 
 或通过 bot 控制面板：`/config` → `🎬 同时播放限制`
-
-### 参数说明
-
-| 参数 | 说明 | 建议值 |
-|---|---|---|
-| `concurrent_play_limit` | 每人允许的同时播放流数量 | 2-3 |
-| `concurrent_play_warn_threshold` | 警告次数上限 | 3-5 |
-| `concurrent_play_check_interval` | 检测间隔（秒） | 30-120 |
-
-### 注意事项
-
-1. 建议将管理员账号设为白名单（`lv: a`），避免被误封
-2. 检测间隔不宜过短，避免对 Emby 服务器造成压力
-3. 与 Emby 原生的 `SimultaneousStreamLimit` 不同，本功能是在流已经开始后终止并警告
 
 ---
 
@@ -117,6 +105,8 @@
 ### 功能说明
 
 通过 Tracearr API 获取会话信息、终止会话、查询违规记录。
+
+详细说明请查看：[Tracearr 对接](Tracearr_Integration.md)
 
 ### 配置方法
 
@@ -131,21 +121,6 @@
 ```
 
 或通过 bot 控制面板：`/config` → `📡 Tracearr对接`
-
-### API Key 获取
-
-1. 登录 Tracearr Web 界面
-2. 进入 Settings → API Keys
-3. 生成新的 API Key
-
-### 终止会话对比
-
-| 方式 | 检查客户端能力 | 可靠性 | 安全性 |
-|---|---|---|---|
-| EmbyBoss 直接终止 | ❌ 不检查 | 较高 | 较低 |
-| Tracearr 终止 | ✅ 检查 | 较低 | 较高 |
-
-> **提示**：EmbyBoss 的终止方式更"强力"，Tracearr 的方式更"安全"。建议主要使用 EmbyBoss 方式，Tracearr 作为备选。
 
 ---
 

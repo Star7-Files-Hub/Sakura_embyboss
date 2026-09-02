@@ -1,6 +1,8 @@
-# 简介
+# Wiki For Emby bot
 
-## 🌸 Sakura_embyboss 初学练习版
+## 🌸 Sakura_embyboss
+
+![bot2](https://berry8838.github.io/Sakura_embyboss/assets/images/bot2.png)
 
 ### 📜 项目说明
 
@@ -13,6 +15,19 @@
 ### 声明
 
 本项目仅供学习交流使用，仅作为辅助工具借助 tg 平台方便用户管理自己的媒体库成员，对用户的其他行为及内容毫不知情
+
+---
+
+## 📑 文档导航
+
+| 页面 | 说明 |
+|---|---|
+| [简介](show.md) | 功能一览、命令帮助 |
+| [如何部署](deploy/introduce.md) | Docker 部署、源码部署 |
+| [使用帮助](use_cases/Helper.md) | 用户功能、Webhook、客户端过滤等 |
+| [同时播放限制](use_cases/Concurrent_Play_Limit.md) | 🆕 同时播放限制检测功能详解 |
+| [Tracearr 对接](use_cases/Tracearr_Integration.md) | 🆕 Tracearr 监控平台对接 |
+| [特别感谢](thanks/thanks.md) | 感谢列表 |
 
 ---
 

@@ -53,8 +53,7 @@ nav:
   - 简介: show.md
   - 如何部署: deploy/introduce.md
   - 使用帮助:
-      - 用户功能: Helper.md
-      - 同时播放限制: Concurrent_Play_Limit.md
-      - Tracearr 对接: Tracearr_Integration.md
-  - 配置说明: Config_Example.md
-  - 特别感谢: thanks.md
+      - 用户功能: use_cases/Helper.md
+      - 同时播放限制: use_cases/Concurrent_Play_Limit.md
+      - Tracearr 对接: use_cases/Tracearr_Integration.md
+  - 特别感谢: thanks/thanks.md

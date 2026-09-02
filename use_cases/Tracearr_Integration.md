@@ -1,5 +1,9 @@
 # Tracearr 对接
 
+[← 返回首页](../index.md) | [使用帮助](Helper.md)
+
+---
+
 ## 功能概述
 
 Tracearr 是一个多服务器监控平台，支持 Plex、Jellyfin 和 Emby。通过对接 Tracearr，EmbyBoss 可以：
@@ -41,18 +45,6 @@ Tracearr 是一个多服务器监控平台，支持 Plex、Jellyfin 和 Emby。�
 - **开关 Tracearr 对接**：启用/禁用功能
 - **设置 Tracearr 参数**：设置 URL 和 API Key
 
-### 操作示例
-
-```
-/config → 📡 Tracearr对接 → 📝 设置Tracearr参数
-```
-
-按提示输入：
-```
-https://tracearr.example.com
-your-api-key-here
-```
-
 ## API Key 获取
 
 1. 登录 Tracearr Web 界面
@@ -79,43 +71,6 @@ your-api-key-here
 | 实时性 | 实时 | 取决于 Tracearr 轮询间隔 |
 | 历史数据 | ❌ 仅当前 | ✅ 完整历史 |
 | 多服务器 | ❌ 单服务器 | ✅ 多服务器聚合 |
-
-## 使用场景
-
-### 场景 1：EmbyBoss 终止失败时，尝试 Tracearr
-
-```python
-# 先尝试 EmbyBoss 直接终止
-success, fail = await terminate_all_user_sessions(emby_user_id, sessions)
-
-# 如果有失败的，尝试通过 Tracearr 终止
-if fail > 0:
-    for session in sessions:
-        await tracearr_terminate_fallback(
-            session.get("Id"),
-            reason="同时播放超出限制"
-        )
-```
-
-### 场景 2：通过 Tracearr 获取更丰富的会话信息
-
-```python
-from bot.modules.extra.tracearr_helper import tracearr
-
-ok, sessions = await tracearr.get_sessions()
-if ok:
-    for s in sessions:
-        print(f"User: {s.get('user')}, Title: {s.get('title')}")
-```
-
-### 场景 3：查询违规记录
-
-```python
-ok, violations = await tracearr.get_violations(acknowledged=False)
-if ok:
-    for v in violations:
-        print(f"Violation: {v.get('type')}, User: {v.get('user')}")
-```
 
 ## 常见问题
 
