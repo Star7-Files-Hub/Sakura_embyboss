@@ -15,7 +15,7 @@ from bot import bot, LOGGER, _open, emby_line, sakura_b, ranks, group, config, b
 from pyrogram import filters
 from bot.func_helper.concurrency import get_user_lock
 from bot.func_helper.emby import emby
-from bot.func_helper.register_queue import get_register_queue_manager, RegisterJob
+from bot.func_helper.register_queue import get_register_queue_manager, RegisterJob, slot_full_message
 from bot.func_helper.filters import user_in_group_on_filter
 from bot.func_helper.utils import members_info, cr_link_one, judge_admins, tem_deluser, pwd_create
 from bot.func_helper.fix_bottons import members_ikb, back_members_ikb, del_me_ikb, re_delme_ikb, \
@@ -80,7 +80,10 @@ async def create_user(_, call, stats):
             failure_text = {
                 "duplicate": "⚠️ 你已经有一个注册任务正在排队或处理中，请勿重复提交。",
                 "queue_full": "⚠️ 当前注册排队人数过多，请稍后再试。",
-                "slot_full": f'**🚫 很抱歉，剩余可注册总数({_open.tem})，已达总注册限制({_open.all_user})。**',
+                # slot_full 由 enqueue() 在 tem + reserved >= all_user 时返回，
+                # 所以要把"已占位"的数量一并展示，否则用户会疑惑
+                # "明明还剩几个席位为什么提示已满"
+                "slot_full": slot_full_message(queue.reserved_slot_count()),
             }.get(reason, "❌ 注册任务提交失败，请稍后重试。")
             return await editMessage(send, failure_text)
 

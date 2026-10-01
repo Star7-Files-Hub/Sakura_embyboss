@@ -21,6 +21,38 @@ class RegisterJob:
     status_message: object
 
 
+def slot_full_message(reserved: int = 0) -> str:
+    """
+    生成"注册席位已满"的提示文案。
+
+    注意字段语义（易错点）：
+      _open.tem      = **已注册人数**，不是剩余。见 utils.tem_adduser()：有人
+                       注册成功就 +1，达到 all_user 时把 stat 置 False。
+      _open.all_user = 总注册限制。
+      剩余席位 = all_user - tem，必须相减才算。
+
+    早期版本把 tem 直接标成"剩余可注册总数"，于是 tem=878 / all_user=882 时
+    会显示成"剩余可注册总数(878)，已达总注册限制(882)" —— 数字看着自相矛盾
+    （用户会以为"还剩 878 却说满了"），实际是 878 个已注册、真实剩余 4 席。
+
+    :param reserved: 已占位但尚未处理完的注册数（enqueue 判定把它算进上限了，
+                     文案必须一并交代，否则用户不理解"明明还剩几个席位却提示已满"）
+    """
+    limit = int(_open.all_user or 0)
+    used = int(_open.tem or 0)
+    remaining = max(0, limit - used)
+
+    text = (
+        f'**🚫 很抱歉，注册席位已满。**\n\n'
+        f'· 已注册 | **{used}**\n'
+        f'· 总注册限制 | **{limit}**\n'
+        f'· 剩余席位 | **{remaining}**'
+    )
+    if reserved > 0:
+        text += f'\n\n__其中 {reserved} 个席位已被排队中的注册占位，请稍后再试。__'
+    return text
+
+
 class RegisterQueueManager:
     def __init__(self):
         self._queue: asyncio.Queue[RegisterJob] = asyncio.Queue()
@@ -54,6 +86,14 @@ class RegisterQueueManager:
     async def is_user_busy(self, user_id: int) -> bool:
         async with self._lock:
             return user_id in self._busy_users
+
+    def reserved_slot_count(self) -> int:
+        """
+        已占位（排队中或处理中）但尚未计入 _open.tem 的席位数。
+
+        仅供展示用，不加锁：读到的值最多略有滞后，不影响正确性。
+        """
+        return int(self._reserved_slots)
 
     async def enqueue(self, job: RegisterJob) -> tuple[bool, str, Optional[int]]:
         await self.ensure_started()
@@ -100,10 +140,8 @@ class RegisterQueueManager:
             if not job.stats and int(current.us or 0) <= 0:
                 return await self._safe_edit(job.status_message, "🤖 当前没有可用注册资格，请重新领取注册码后再试。")
             if _open.tem >= _open.all_user:
-                return await self._safe_edit(
-                    job.status_message,
-                    f'**🚫 很抱歉，剩余可注册总数({_open.tem})，已达总注册限制({_open.all_user})。**',
-                )
+                # 此处席位已被真实消耗，remaining 必为 0，无需再提占位数
+                return await self._safe_edit(job.status_message, slot_full_message())
 
             await self._safe_edit(
                 job.status_message,
