@@ -154,10 +154,29 @@
 2. 进入 **Settings → API**（"The public API key, its rate limit and what counts as watched"）
 3. 生成新的 API Key（公开 API Key，不是某个媒体服务器的 apiKey）
 
-> ⚠️ **API 前缀**：Tracearr 的公开 API 位于 `/api/v1/...`，本 bot 已按此对接。
-> 早期版本曾把前缀写成 `/api/...`，会导致所有请求返回 `404 {"error":"Not Found"}`，
-> 表现为"Tracearr 对接不生效"。若你修改过 `tracearr_helper.py`，请确认前缀是 `/api/v1`。
-> 鉴权方式为 `Authorization: Bearer <API Key>`。
+> ⚠️ **API 前缀与端点**（实机核对 Tracearr v2.5.1，取自 `/api/v1/public/docs` 的 OpenAPI 规范）
+>
+> 公开 API 挂在 **`/api/v1/public/`** 下，鉴权为 `Authorization: Bearer trr_pub_...`。
+> 注意区分：`/api/v1/...`（无 `public`）是**管理端 API**，需要浏览器会话 JWT，
+> 公开 API Key 打过去只会得到 `401 Invalid or expired token`。
+>
+> 公开 API 一共只有 9 个端点，**没有 `sessions`、也没有 `servers`**：
+>
+> | 端点 | 说明 |
+> |---|---|
+> | `GET /api/v1/public/health` | 健康状态 + 服务器列表（`servers[]`） |
+> | `GET /api/v1/public/streams` | **活跃会话**（不叫 sessions） |
+> | `POST /api/v1/public/streams/{id}/terminate` | 终止会话，body `{"reason": "..."}` |
+> | `GET /api/v1/public/users` | 用户列表 |
+> | `GET /api/v1/public/violations` | 违规记录（支持 `acknowledged`） |
+> | `GET /api/v1/public/history` | 会话历史 |
+> | `GET /api/v1/public/stats`、`/stats/today`、`/activity` | 统计 |
+>
+> 列表类接口的响应是**信封结构** `{"data": [...], "meta"/"summary": {...}}`，
+> 本 bot 已统一拆出 `data`。
+>
+> 早期版本把前缀写成 `/api/sessions`，实测全部 404（被静默吞成一条 ERROR 日志）。
+> 若你修改过 `tracearr_helper.py`，请对照上表确认。
 
 ### 自检
 
@@ -166,10 +185,16 @@
 ```bash
 curl -s -o /dev/null -w "%{http_code}\n" \
   -H "Authorization: Bearer <你的API Key>" \
-  http://<tracearr地址>/api/v1/sessions
+  http://<tracearr地址>/api/v1/public/streams
 ```
 
-`200` = 正常；`401` = 路径对但 Key 无效；`404` = 前缀写错了。
+`200` = 正常；`401` = Key 无效；`404` = 前缀或端点写错了。
+想看完整端点清单可直接拉官方规范：
+
+```bash
+curl -s -H "Authorization: Bearer <你的API Key>" \
+  http://<tracearr地址>/api/v1/public/docs | python3 -m json.tool | less
+```
 
 ### 终止会话对比
 
