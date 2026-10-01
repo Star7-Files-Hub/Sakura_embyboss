@@ -30,6 +30,7 @@ def sql_add_favorites(embyid: str, embyname: str, item_id: str, item_name: str, 
         item_name: 项目名称
         is_favorite: True为收藏，False为取消收藏
     """
+    session = None
     try:
         with Session() as session:
             if is_favorite:
@@ -42,6 +43,7 @@ def sql_add_favorites(embyid: str, embyname: str, item_id: str, item_name: str, 
                 ).all()
                 
                 if existing_list:
+                    pending_delete_ids = set()
                     if len(existing_list) > 1:
                         # 如果存在多个重复记录，只保留第一个，删除其余的
                         LOGGER.warning(f"发现 {len(existing_list)} 个重复收藏记录: {embyname} -> {item_name}，清理重复记录")
@@ -49,21 +51,40 @@ def sql_add_favorites(embyid: str, embyname: str, item_id: str, item_name: str, 
                         
                         # 删除其余重复记录
                         for duplicate in existing_list[1:]:
+                            pending_delete_ids.add(duplicate.id)
                             session.delete(duplicate)
                             LOGGER.info(f"删除重复收藏记录: {embyname} -> {item_name} (ID: {duplicate.id})")
                     else:
                         keep_record = existing_list[0]
                     
-                    # 更新保留的记录
-                    old_embyid = keep_record.embyid
-                    keep_record.embyid = embyid
-                    keep_record.item_name = item_name
-                    keep_record.created_at = datetime.now()
-                    
-                    if old_embyid != embyid:
-                        LOGGER.info(f"更新收藏记录: {embyname} -> {item_name} (EmbyID: {old_embyid} -> {embyid})")
+                    # B-M11：唯一约束是 (embyid, item_id)，而这里按 (embyname, item_id) 去重。
+                    # 若目标 (embyid, item_id) 已被其它记录占用，直接改写 embyid 会在 commit 时抛
+                    # IntegrityError 并被吞掉（收藏静默丢失），因此先检测冲突：冲突时删除本条。
+                    conflict_filters = [
+                        EmbyFavorites.embyid == embyid,
+                        EmbyFavorites.item_id == item_id,
+                        EmbyFavorites.id != keep_record.id,
+                    ]
+                    if pending_delete_ids:
+                        conflict_filters.append(EmbyFavorites.id.notin_(pending_delete_ids))
+                    conflict = session.query(EmbyFavorites).filter(*conflict_filters).first()
+                    if conflict is not None:
+                        LOGGER.warning(
+                            f"收藏记录唯一键冲突，删除重复记录: {embyname} -> {item_name} "
+                            f"(EmbyID: {embyid}, 冲突记录 ID: {conflict.id})"
+                        )
+                        session.delete(keep_record)
                     else:
-                        LOGGER.info(f"刷新收藏记录: {embyname} -> {item_name}")
+                        # 更新保留的记录
+                        old_embyid = keep_record.embyid
+                        keep_record.embyid = embyid
+                        keep_record.item_name = item_name
+                        keep_record.created_at = datetime.now()
+                        
+                        if old_embyid != embyid:
+                            LOGGER.info(f"更新收藏记录: {embyname} -> {item_name} (EmbyID: {old_embyid} -> {embyid})")
+                        else:
+                            LOGGER.info(f"刷新收藏记录: {embyname} -> {item_name}")
                 else:
                     # 不存在收藏记录，创建新记录
                     favorite = EmbyFavorites(
@@ -97,17 +118,29 @@ def sql_add_favorites(embyid: str, embyname: str, item_id: str, item_name: str, 
             return True
             
     except Exception as e:
+        # B-M11/B-L1：补显式 rollback，失败不再静默
+        if session is not None:
+            try:
+                session.rollback()
+            except Exception:
+                pass
         LOGGER.error(f"操作收藏记录失败: {str(e)}")
         return False
     
 def sql_clear_favorites(emby_name: str) -> bool:
     """清除Emby用户的收藏记录"""
+    session = None
     try:
         with Session() as session:
             session.query(EmbyFavorites).filter(EmbyFavorites.embyname == emby_name).delete()
             session.commit()
         return True
     except Exception as e:
+        if session is not None:
+            try:
+                session.rollback()
+            except Exception:
+                pass
         LOGGER.error(f"清除收藏记录失败: {str(e)}")
         return False
 def sql_get_favorites(embyid: str, page: int = 1, page_size: int = 20) -> list:

@@ -6,10 +6,31 @@
 *.iml
 out
 gen
-!/keaiji.session
-!/keaiji_bot.session
-!/keaiji_bot.session-journal
 __pycache__
+*.py[cod]
+
+# ============================================================
+# 凭据 / 会话 / 运行时数据（D-H2、D-M6）
+# ============================================================
+# config.json 含 bot_token / emby_api / db_pwd / tz_password / moviepilot.access_token，
+# 泄露即可接管 bot 与 Emby 服务器，禁止提交。
+# 首次部署请：cp config_example.json config.json && chmod 600 config.json
+config.json
+config.json.bak
+config.json.*
+# Pyrogram 登录会话，泄露等同于 Telegram 账号被接管。
+*.session
+*.session-journal
+
+# 运行时产物
 log
+log/**
+db_backup/
+db/
+*.log
+caddy-local.log
 *.sql
-bot-env
+
+# 本地环境变量（如 REGISTER_QUEUE_REAL 等调试开关）
+.env
+.env.*

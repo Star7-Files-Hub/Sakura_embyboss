@@ -17,16 +17,37 @@ Author: embyboss
 """
 
 import aiohttp
+from urllib.parse import urlparse
+
 from bot import config, LOGGER
+
+# 只允许 http/https：tracearr_url 由管理员在面板任意填写，
+# 不做限制时配置错误会把 Bearer API Key 发往任意地址（如 file:// 或内网元数据地址）。
+_ALLOWED_SCHEMES = ("http", "https")
+_LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1"}
 
 
 class TracearrClient:
     """Tracearr API 客户端"""
 
     def __init__(self, base_url: str = None, api_key: str = None):
-        self.base_url = (base_url or config.tracearr_url or "").rstrip('/')
+        raw_base_url = (base_url or config.tracearr_url or "").rstrip('/')
         self.api_key = api_key or config.tracearr_api_key or ""
         self._session: aiohttp.ClientSession = None
+        self.base_url = raw_base_url
+
+        # 校验地址合法性：scheme 必须是 http/https 且要有主机名
+        if raw_base_url:
+            parsed = urlparse(raw_base_url)
+            if parsed.scheme not in _ALLOWED_SCHEMES or not parsed.hostname:
+                LOGGER.error(
+                    f"Tracearr 地址不合法，已禁用对接（必须是 http/https 且包含主机名）: {raw_base_url}"
+                )
+                self.base_url = ""
+            elif parsed.scheme != "https" and parsed.hostname not in _LOOPBACK_HOSTS:
+                LOGGER.warning(
+                    "Tracearr 使用明文 HTTP，Bearer API Key 将以明文传输，建议改用 HTTPS。"
+                )
 
     @property
     def enabled(self):
@@ -67,7 +88,9 @@ class TracearrClient:
                     return True, None
                 else:
                     error_text = await response.text()
-                    return False, f"HTTP {response.status}: {error_text}"
+                    # 不把上游响应正文回传给调用方（可能含敏感信息），只记录到日志
+                    LOGGER.error(f"Tracearr 请求失败 HTTP {response.status}: {error_text[:500]}")
+                    return False, f"Tracearr 请求失败（HTTP {response.status}）"
         except aiohttp.ClientError as e:
             return False, f"网络错误: {str(e)}"
         except Exception as e:

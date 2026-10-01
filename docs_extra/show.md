@@ -114,6 +114,11 @@
 | `ucr` | 私聊创建非 tg 的 emby 用户 |
 | `uinfo` | 查询指定用户名 |
 | `urm` | 删除指定用户名 |
+| `only_rm_emby [embyid] true` | 仅删除数据库记录、保留 Emby 账号（**需 `true` 确认**） |
+| `banall` / `unbanall` | 批量封禁 / 解封本 bot 管理的账号；加 `all` 参数才会包含手工创建的 Emby 账号 |
+
+> ⚠️ **不可逆批量操作需要二次确认**：`only_rm_emby` 与所有 `*all` 类命令都必须显式带上参数 `true` 才会真正执行；
+> 不带 `true` 时只返回一条说明消息，不会改动任何数据。这是为了防止误触导致全站用户被批量改权限或删除。
 
 ### 主人 (owner)
 
@@ -128,8 +133,8 @@
 | `bindall_id` | 一键更新用户 EmbyID |
 | `backup_db` | 手动备份数据库 |
 | `config` | 开启 bot 高级控制面板 |
-| `extraembylibs_blockall` | 一键关闭所有用户的额外媒体库 |
-| `extraembylibs_unblockall` | 一键开启所有用户的额外媒体库 |
+| `extraembylibs_blockall true` | 一键关闭所有用户的额外媒体库（**需 `true` 确认**） |
+| `extraembylibs_unblockall true` | 一键开启所有用户的额外媒体库（**需 `true` 确认**） |
 
 > 在 telegram 中，默认的命令符为 `/`，但 embyboss 支持多种前缀：
 > `/start` = `.start` = `，start` = `!start` = `。start`

@@ -4,6 +4,7 @@ from typing import Dict, List, Optional, Tuple
 from sqlalchemy import BigInteger, Column, DateTime, Integer, String
 
 from bot.sql_helper import Base, Session
+from bot import LOGGER
 
 
 class PartitionCode(Base):
@@ -241,15 +242,54 @@ def sql_clear_used_partition_grants() -> int:
             return 0
 
 
-def sql_clear_all_partition_data() -> int:
+def sql_expire_all_active_grants(now: datetime = None) -> int:
+    """把所有仍生效的分区授权强制置为"已到期"（不删除记录），返回受影响行数。
+
+    用途：`sql_clear_all_partition_data()` 会**删除**授权记录，而 Emby 侧的库权限
+    只能由 `bot/scheduler/partition_access.py::check_partition_access()` 收回——
+    它只处理 `status == "active"` 且 `expires_at <= now` 的记录。
+    一旦记录被删，这些用户就再也不会进入撤销流程，**Emby 侧的库访问权限会被永久保留**
+    （fail-open）。因此"清除全部"必须先调用本函数把授权置为到期，
+    再跑一次 `check_partition_access()` 真正收回权限，最后才删除记录。
+    """
+    now = now or datetime.now()
     with Session() as session:
         try:
-            count = session.query(PartitionCode).delete(synchronize_session=False)
+            updated = (
+                session.query(PartitionGrant)
+                .filter(PartitionGrant.status == "active")
+                .update(
+                    {PartitionGrant.expires_at: now, PartitionGrant.updated_at: now},
+                    synchronize_session=False,
+                )
+            )
             session.commit()
-            return count
-        except Exception:
+            return int(updated or 0)
+        except Exception as e:
             session.rollback()
-            return 0 
+            LOGGER.error(f"强制到期全部分区授权失败: {e}")
+            return 0
+
+
+def sql_clear_all_partition_data() -> int:
+    """
+    清空全部分区数据：未使用的分区码 + 已发放的授权记录。
+    B-M13：原实现只删了 PartitionCode，与函数名以及调用方"清除全部"的预期不符，
+    已发放的授权会残留并继续生效。返回删除的总条数。
+
+    ⚠️ 调用方必须先执行 `sql_expire_all_active_grants()` + `check_partition_access()`
+    收回 Emby 侧权限，否则删除记录会让这些用户的库权限永久残留（见前者的文档字符串）。
+    """
+    with Session() as session:
+        try:
+            codes_deleted = session.query(PartitionCode).delete(synchronize_session=False)
+            grants_deleted = session.query(PartitionGrant).delete(synchronize_session=False)
+            session.commit()
+            return int(codes_deleted or 0) + int(grants_deleted or 0)
+        except Exception as e:
+            session.rollback()
+            LOGGER.error(f"清空全部分区数据失败: {e}")
+            return 0
 
 
 def sql_redeem_partition_code_atomic(

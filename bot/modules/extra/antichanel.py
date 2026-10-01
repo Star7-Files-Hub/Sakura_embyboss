@@ -21,7 +21,15 @@ async def get_user_input(msg):
         except (IndexError, KeyError, ValueError, AttributeError):
             return None, gm
     else:
-        chatid = msg.reply_to_message.sender_chat.id
+        # 被回复的消息可能来自普通用户，此时 sender_chat 为 None（原实现会抛 AttributeError）
+        sender_chat = msg.reply_to_message.sender_chat
+        if sender_chat is None:
+            return None, gm
+        chatid = sender_chat.id
+    # 皮套人只可能是频道/群组身份，其 chat id 必为负数。
+    # 拒绝正数（用户 id），避免 /unban_channel、/rev_white_channel 被用来对任意用户执行封禁/解禁。
+    if not isinstance(chatid, int) or chatid >= 0:
+        return None, gm
     return chatid, gm
 
 
@@ -62,7 +70,9 @@ custom_message_filter = filters.create(
     lambda _, __, message: False if message.forward_from_chat or message.from_user or not config.fuxx_pitao else True)
 custom_chat_filter = filters.create(
     lambda _, __,
-           message: True if message.sender_chat.id != message.chat.id and message.sender_chat.id not in w_anti_channel_ids else False)
+           message: bool(message.sender_chat
+                         and message.sender_chat.id != message.chat.id
+                         and message.sender_chat.id not in w_anti_channel_ids))
 
 
 @bot.on_message(custom_message_filter & custom_chat_filter & filters.group)
@@ -75,5 +85,6 @@ async def fuxx_pitao(_, msg):
         await msg.chat.ban_member(msg.sender_chat.id)
         LOGGER.info(
             f'【AntiChannel】- {msg.sender_chat.title} - {msg.sender_chat.id} 被封禁')
-    except:
-        pass
+    except Exception as e:
+        # 原实现静默吞掉异常，导致自动狙杀失败时没有任何线索
+        LOGGER.error(f'【AntiChannel】- 自动狙杀皮套人失败: {e}')

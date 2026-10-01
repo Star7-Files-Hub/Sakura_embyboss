@@ -13,6 +13,10 @@ from bot.sql_helper.sql_emby import sql_get_emby, sql_update_emby, Emby
 from bot.sql_helper.sql_emby2 import sql_get_emby2, sql_delete_emby2, sql_add_emby2, sql_update_emby2
 from bot.sql_helper.sql_emby2 import Emby2
 
+# /ucr 允许的最大使用天数（十年）。此前对天数无任何上下界校验，
+# 负数或超大值会造出到期时间异常（已过期 / 数百年后）的账号。
+MAX_CREATE_DAYS = 3650
+
 
 @bot.on_message(filters.command('ucr', prefixes) & admins_on_filter & filters.private)
 async def login_account(_, msg):
@@ -24,6 +28,12 @@ async def login_account(_, msg):
         return await sendMessage(msg, "🔍 **无效的值。\n\n"
                                       "正确用法:** `/ucr [用户名] [使用天数]`", timer=60)
     else:
+        if not 0 < days <= MAX_CREATE_DAYS:
+            return await sendMessage(
+                msg,
+                f"🔍 **使用天数必须在 1 ~ {MAX_CREATE_DAYS} 之间。\n\n"
+                f"正确用法:** `/ucr [用户名] [使用天数]`",
+                timer=60)
         send = await msg.reply(
             f'🆗 收到设置\n\n'
             f'用户名：**{name}**\n\n'
@@ -39,12 +49,32 @@ async def login_account(_, msg):
         else:
             embyid, pwd, ex = result
             sql_add_emby2(embyid=embyid, name=name, cr=datetime.now(), ex=ex, pwd=pwd, pwd2=pwd)
+            # sql_add_emby2 内部 `except: pass` 且不返回结果，因此这里显式复查是否真的写入了。
+            # 写入失败时必须回滚远端账号，否则会在 Emby 侧留下一个「数据库里没有记录」的孤儿账号：
+            # 它不受到期检测/活跃检测管辖，却一直占用 Emby 的账号名额。
+            if sql_get_emby2(name) is None:
+                LOGGER.error(f"【创建非tg账户】数据库写入失败，尝试回滚远端账号 {name} ({embyid})")
+                try:
+                    await emby.emby_del(emby_id=embyid)
+                except Exception as e:
+                    LOGGER.error(
+                        f"【创建非tg账户】回滚远端账号失败，请手动删除 {name} ({embyid}): {e}")
+                return await send.edit(
+                    '创建失败：数据库写入异常，已尝试回滚远端账号。\n\n'
+                    '请查看日志确认；若远端仍存在同名账号，请手动删除后重试。')
+            # 口令不写进常驻消息：改为单独发送一条 60 秒后自动删除的消息，
+            # 避免明文口令长期留在 Telegram 聊天记录里。
             await send.edit(
                 f'**🎉 成功创建有效期{days}天 #{name}\n\n'
                 f'• 用户名称 | `{name}`\n'
-                f'• 用户密码 | `{pwd}`\n'
+                f'• 用户密码 | 见下方单独消息（60 秒后自动删除）\n'
                 f'• 当前线路 | \n{emby_line}\n\n'
                 f'• 到期时间 | {ex}**')
+            await sendMessage(
+                msg,
+                f'🔑 #{name} 的初始密码：`{pwd}`\n'
+                f'⚠️ 该消息 60 秒后自动删除，请立即转告用户并建议其尽快改密。',
+                timer=60)
 
             if msg.from_user.id != owner:
                 await bot.send_message(owner,
@@ -90,7 +120,7 @@ async def urm_user(_, msg):
             f"【admin】：管理员 {msg.from_user.first_name} 执行删除失败 emby 账户 {e.name}")
 
 
-@bot.on_message(filters.command('uinfo', prefixes) & admins_on_filter)
+@bot.on_message(filters.command('uinfo', prefixes) & admins_on_filter & filters.private)
 async def uun_info(_, msg, name = None):
     if msg.reply_to_message is None:
         try:

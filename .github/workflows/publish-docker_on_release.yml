@@ -5,36 +5,48 @@ on:
   release:
     types: [published]
 
+# D-L3：release 与手动触发不会并发发布同一版本。
+concurrency:
+  group: publish-docker-release
+  cancel-in-progress: false
+
 jobs:
   push_to_registries:
     name: Push docker image to docker hub
     runs-on: ubuntu-latest
+    # 权限已收敛为最小集（正面项，勿放宽）。
     permissions:
       packages: write
       contents: read
     steps:
       -
         name: Checkout
-        uses: actions/checkout@v3
+        # D-L3：固定到明确的版本 tag，避免 @v3 这类陈旧浮动标签。
+        # 如需最高供应链安全等级，请把 tag 换成 40 位 commit SHA 并保留版本注释：
+        #   uses: actions/checkout@<commit-sha>  # v4.x.y
+        uses: actions/checkout@v4
       -
         name: Set up QEMU
-        uses: docker/setup-qemu-action@v2
+        uses: docker/setup-qemu-action@v3
       -
         name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v2
+        uses: docker/setup-buildx-action@v3
       -
         name: Login to Docker Hub
-        uses: docker/login-action@v2
+        uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKER_USERNAME }}
           password: ${{ secrets.DOCKER_PASSWORD }}
 
       - name: Build and push images
-        uses: docker/build-push-action@v4
+        uses: docker/build-push-action@v6
         with:
           context: .
           platforms: linux/amd64,linux/arm64
           file: ./Dockerfile
           push: true
+          # D-L3：产出构建来源证明与 SBOM，便于下游校验镜像来源。
+          provenance: true
+          sbom: true
           tags: |
             ${{ secrets.DOCKER_USERNAME }}/sakura_embyboss:${{ github.event.release.tag_name }}

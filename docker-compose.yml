@@ -1,44 +1,110 @@
-#（此处请注意，arm架构请注意修改镜像名称以免拉错无法启动）
-version: '3'
+# ============================================================
+# Sakura_embyboss docker-compose 示例
+# ============================================================
+# ⚠️ 启动前请先读完下面三条安全提示：
+#
+# 1) 本文件里的口令全部是"占位符"，必须替换成自己生成的高强度随机口令
+#    （例如 `openssl rand -base64 24`），并让 MYSQL_PASSWORD 与 config.json
+#    里的 db_pwd 保持一致。绝对不要沿用示例值。
+#
+# 2) MySQL root 账号必须显式限制为 localhost（见下方 MYSQL_ROOT_HOST）。
+#    注意：docker-library/mysql 的 entrypoint 是 `file_env 'MYSQL_ROOT_HOST' '%'`，
+#    **不设置该变量时默认值就是 "%"（允许任意 IP 用 root 登录）**。
+#    所以"把这一行删掉"并不能收紧权限，必须显式写成 "localhost"。
+#
+# 3) 3306 只发布到宿主机回环地址（127.0.0.1），不要发布成 0.0.0.0。
+#    这样即使口令被爆破，攻击者也需要先拿到宿主机权限。
+#
+# ARM 架构注意：把 mysql 的镜像名换成对应的 arm 镜像（见注释）。
+#
+# 说明（D-L5）：`version: '3'` 在 Compose V2 已废弃，这里直接删除；
+# 未生效的 depends_on 已随 phpmyadmin 注释段一并整理。
+
 services:
   mysql:
-    image: mysql:5.7 # 镜像名称，ARM架构镜像名为 liupeng0518/mysql:5.7-arm64 
-    container_name: mysql # 容器名
+    # 说明：MySQL 5.7 已于 2023-10 结束官方安全支持（EOL）。
+    # 这里固定到 5.7 的最后一个补丁版本，避免拉取到浮动镜像；
+    # 新部署建议改用 mysql:8.0 —— 但 5.7 → 8.0 **不能直接复用数据目录**，
+    # 必须先 mysqldump 导出、换镜像、再导入。
+    # ARM 架构镜像名示例：liupeng0518/mysql:5.7-arm64
+    image: mysql:5.7.44
+    container_name: mysql
     command: mysqld --character-set-server=utf8mb4 --collation-server=utf8mb4_unicode_ci # 设置utf8字符集
     restart: always
-    network_mode: host
     environment:
-      MYSQL_ROOT_PASSWORD: 123456 # root管理员用户密码
-      MYSQL_USER: susu   # 创建需要连接的用户
-      MYSQL_DATABASE: embyboss # 数据库名字
-      MYSQL_PASSWORD: 1234  # 设置普通用户的密码
-      MYSQL_ROOT_HOST: "%" # 所有ip可连接
+      # ⚠️ 以下 4 个值必须替换为自己的强随机口令
+      MYSQL_ROOT_PASSWORD: "CHANGE_ME_strong_root_password"  # root管理员用户密码
+      MYSQL_USER: "susu"                                     # 创建需要连接的用户
+      MYSQL_DATABASE: "embyboss"                             # 数据库名字
+      MYSQL_PASSWORD: "CHANGE_ME_strong_user_password"       # 普通用户密码，需与 config.json 的 db_pwd 一致
+      # 关键（D-C3）：显式限制 root 只能从容器本机登录。
+      # 不能删除本行——删除后 entrypoint 会回落到默认值 "%"。
+      MYSQL_ROOT_HOST: "localhost"
     ports:
-      - '3306:3306'  # host物理直接映射端口为
+      # 只绑定宿主机回环地址，避免数据库暴露到公网/内网（D-C3）
+      - "127.0.0.1:3306:3306"
     volumes:
-      - /root/Sakura_embyboss/db:/var/lib/mysql
+      # ⚠️ 这里沿用历史默认路径；换机器 / 换目录时务必改成实际路径，
+      #    否则会挂载出一个空库。也可以用环境变量覆盖：
+      #      MYSQL_DATA_DIR=/your/path docker compose up -d
+      - ${MYSQL_DATA_DIR:-/root/Sakura_embyboss/db}:/var/lib/mysql
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -uroot -p\"$$MYSQL_ROOT_PASSWORD\" --silent"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
 
-  # 以下 phpmyadmin 主要是为了更为直观的供owner翻阅数据，不影响bot运行，如有其他合适软件，可注释内容 # xxxx
-#  phpmyadmin:
-#    image: phpmyadmin/phpmyadmin
-#    container_name: phpmyadmin
-#    restart: always
-#    ports:
-#      - 8080:80  #映射端口可以自己改的
-#    environment:
-#      MYSQL_ROOT_PASSWORD: "123456"
-#      PMA_HOST: mysql
-#      PMA_PORT: 3306
-#    depends_on:
-#      - mysql
+  # 以下 phpmyadmin 主要是为了更为直观的供owner翻阅数据，不影响bot运行，
+  # 如有其他合适软件，可取消注释启用。注意它会把数据库管理界面暴露到 8080，
+  # 如需启用请改成只监听回环地址："127.0.0.1:8080:80"。
+  #  phpmyadmin:
+  #    image: phpmyadmin/phpmyadmin
+  #    container_name: phpmyadmin
+  #    restart: always
+  #    ports:
+  #      - "127.0.0.1:8080:80"
+  #    environment:
+  #      MYSQL_ROOT_PASSWORD: "CHANGE_ME_strong_root_password"
+  #      PMA_HOST: mysql
+  #      PMA_PORT: 3306
+  #    depends_on:
+  #      mysql:
+  #        condition: service_healthy
 
   embyboss:
-    image: jingwei520/sakura_embyboss:latest # ARM与AMD镜像名称相同，会自动加载适合的镜像
+    # ⚠️ 不要使用浮动的 :latest（镜像内容随时可被替换，见 D-H3）。
+    # 生产环境请固定为具体的 tag 或 digest，例如：
+    #   image: jingwei520/sakura_embyboss@sha256:<你验证过的 digest>
+    # 这里保留 latest 作为默认值只是为了不破坏现有部署；
+    # 建议复制本文件并把下面这行改成固定的 tag / digest，或用环境变量覆盖：
+    #   EMBYBOSS_IMAGE=jingwei520/sakura_embyboss@sha256:... docker compose up -d
+    image: ${EMBYBOSS_IMAGE:-jingwei520/sakura_embyboss:latest}
     container_name: embyboss
     restart: always
+    # 说明（D-C2）：host 网络是为了让 bot 能直接连宿主机上的 Emby / MySQL。
+    # 代价是 bot 的 API 端口直接绑在宿主机网卡上（host 模式下 ports 映射无效）。
+    # 因此必须同时在 config.json 里：
+    #   "api": {"http_url": "127.0.0.1", "allow_origins": [...]}  ← 只监听回环，反代同机可达
+    # 否则 8838 会直接对公网暴露（见 D-C2 / D-C1）。
     network_mode: host
     volumes:
+      # ⚠️ 镜像以非 root 用户 app(uid=1000) 运行，而 bot 启动时会回写 config.json
+      #    （bot/__init__.py 的 save_config()），因此这两个挂载点必须对 uid 1000 可读写。
+      #    首次升级请执行：
+      #      chown 1000:1000 config.json && chown -R 1000:1000 log db_backup
+      #    实在无法调整宿主目录权限时，可临时取消注释下面的 user 回退为 root（不推荐）。
       - ./config.json:/app/config.json
       - ./log:/app/log
-#    ports:
-#      - '8838:8838' # 为api服务映射端口 host模式无需操作
+    # user: "0:0"   # 紧急回退：以 root 运行（会失去 D-M1 的最小权限收益）
+    healthcheck:
+      test: ["CMD-SHELL", "grep -qa main.py /proc/1/cmdline || exit 1"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 90s
+    # 仅在**不使用** host 网络时才需要端口映射；改成 bridge 网络后请同步把
+    # config.json 的 db_host / emby_url 指向宿主机地址（host.docker.internal
+    # 或宿主机内网 IP），否则 bot 会连不上数据库和 Emby。
+    # ports:
+    #   - "127.0.0.1:8838:8838" # 只监听回环，再由 nginx/caddy 反代对外

@@ -14,7 +14,10 @@ def judge_admins(uid):
     :param uid: tg_id
     :return: bool
     """
-    if uid != owner and uid not in admins and uid not in group:
+    # 注意：不要在此处加入 `uid not in group`。group 是授权群/频道的 chat id 列表（值为负），
+    # 而 uid 是 tg 用户 id（值为正），二者取值域不相交，该子句对任何真实用户恒为 True
+    # （A-C2 已证伪为死代码）。群成员判定请统一走 filters.user_in_group_on_filter。
+    if uid != owner and uid not in admins:
         return False
     else:
         return True

@@ -1,6 +1,6 @@
 from bot.func_helper.emby import emby
 from pyrogram import filters
-from bot import bot, bot_name
+from bot import bot, bot_name, LOGGER
 from bot.func_helper.filters import admins_on_filter
 from bot.func_helper.msg_utils import editMessage
 from bot.func_helper.fix_bottons import whitelist_page_ikb, normaluser_page_ikb,devices_page_ikb 
@@ -12,7 +12,7 @@ import math
 async def list_whitelist(_, call):
     await callAnswer(call, '🔍 白名单用户列表')
     page = 1
-    whitelist_users = get_all_emby(Emby.lv == 'a')
+    whitelist_users = get_all_emby(Emby.lv == 'a') or []
     total_users = len(whitelist_users)
     total_pages = math.ceil(total_users / 20)
 
@@ -24,7 +24,7 @@ async def list_whitelist(_, call):
 async def list_normaluser(_, call):
     await callAnswer(call, '🔍 普通用户列表')
     page = 1
-    normal_users = get_all_emby(Emby.lv == 'b')
+    normal_users = get_all_emby(Emby.lv == 'b') or []
     total_users = len(normal_users)
     total_pages = math.ceil(total_users / 20)
 
@@ -37,7 +37,7 @@ async def list_normaluser(_, call):
 async def whitelist_page(_, call):
     page = int(call.data.split(':')[1])
     await callAnswer(call, f'🔍 打开第{page}页')
-    whitelist_users = get_all_emby(Emby.lv == 'a')
+    whitelist_users = get_all_emby(Emby.lv == 'a') or []
     total_users = len(whitelist_users)
     total_pages = math.ceil(total_users / 20)
 
@@ -50,7 +50,7 @@ async def whitelist_page(_, call):
 async def normaluser_page(_, call):
     page = int(call.data.split(':')[1])
     await callAnswer(call, f'🔍 打开第{page}页')
-    normal_users = get_all_emby(Emby.lv == 'b')
+    normal_users = get_all_emby(Emby.lv == 'b') or []
     total_users = len(normal_users)
     total_pages = math.ceil(total_users / 20)
 
@@ -97,7 +97,19 @@ async def user_devices(_, call):
         return await callAnswer(call, '🤕 Emby 服务器连接失败!')
 
     text = '**💠 用户设备列表**\n\n'
-    for name, device_count, ip_count in result:
-        text += f'用户名: [{name}](https://t.me/{bot_name}?start=userip-{name}) | 设备: {device_count} | IP: {ip_count}\n'
+    for row in result or []:
+        # B-L10：这一列是 Emby 的 UserId（GUID），不是用户名；这里补一次用户名解析并做长度兜底
+        if not row or len(row) < 3:
+            LOGGER.warning(f"跳过异常的设备统计行: {row}")
+            continue
+        user_id, device_count, ip_count = row[0], row[1], row[2]
+        display_name = user_id
+        try:
+            user_success, user_info = await emby.user(user_id)
+            if user_success and isinstance(user_info, dict) and user_info.get('Name'):
+                display_name = user_info.get('Name')
+        except Exception as e:
+            LOGGER.warning(f"解析设备页用户名失败 {user_id}: {e}")
+        text += f'用户名: [{display_name}](https://t.me/{bot_name}?start=userip-{user_id}) | 设备: {device_count} | IP: {ip_count}\n'
     text += f"\n第 {page} 页"
     await editMessage(call, text, buttons=devices_page_ikb(has_prev, has_next, page))

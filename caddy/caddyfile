@@ -1,8 +1,25 @@
-{
-	# 本地测试关闭自动 HTTPS，开启 debug 日志方便排查。
-	auto_https off
-	debug
-}
+# ============================================================
+# Sakura_embyboss Caddy 示例（Caddyfile）
+# ============================================================
+# 用户只需要修改文件最后一行的 import 参数（见末尾说明）。
+#
+# ------------------------------------------------------------
+# D-M4 / TLS 说明（正式环境必读）：
+# 旧示例在全局块里写了 `auto_https off` + `debug`，并强制使用 `http://` 站点，
+# 等于明确关闭了 HTTPS；而 Emby 客户端会在请求头/查询串里携带 Emby 凭据
+# （X-Emby-Token / X-Emby-Authorization / api_key），明文 HTTP 会让同链路的
+# 任何人抓到这些凭据并直接接管 Emby 账号（含管理员）。
+# 现在已去掉这两个全局开关，改为：
+#   - 正式环境（推荐）：把站点地址从 `http://{args[0]}:{args[2]}` 改成
+#     `{args[0]}` 或 `https://{args[0]}`，Caddy 会自动通过 ACME 申请并续期证书
+#     （前提：域名解析到本机、80/443 可达）。
+#   - 本机调试：保留 `http://` 前缀即可，Caddy 对显式 http:// 的站点不会尝试签发证书。
+#   - 排查问题时再临时加 `debug`（它会输出全部请求细节，长期开启既吵又占磁盘）。
+# ------------------------------------------------------------
+# 日志：下面把访问日志写到当前目录的 caddy-local.log，方便本地调试；
+# 生产环境建议改成 /var/log/caddy/emby_local.log 并纳入 logrotate，
+# 同时确保该文件不会被提交（仓库 .gitignore 已忽略 caddy-local.log）。
+# ============================================================
 
 (emby_local_config) {
 	http://{args[0]}:{args[2]} {
@@ -16,7 +33,7 @@
 		# 这里只要命中 /emby/Sessions/Playing 开头的请求，都会先走 line_report，再反代到 Emby。
 		@line_audit_play path /emby/Sessions/Playing /emby/Sessions/Playing/*
 
-		# 播放列表创建：直接重定向到 bot 的 ban_playlist 接口。
+		# 播放列表创建 / 修改 / 删除：命中后直接拒绝。
 		@playlist_create {
 			method POST
 			path /emby/Playlists
@@ -47,21 +64,46 @@
 		}
 
 		route {
+			# ---- D-C1 / 修复契约 3.4 ----
+			# 旧实现是 `redir http://{args[4]}/emby/ban_playlist?eid={query.userId} 302`，
+			# 它同时造成三个问题：
+			#   1) Location 头会把 bot 的内网地址与端口泄露给任意客户端；
+			#   2) 浏览器跟随 302（跨域 POST 变 GET）后会直接命中无鉴权的封禁端点；
+			#   3) 跳转目标还是明文 http://，同链路的人可以篡改 eid。
+			# 现在改为直接 403：既不泄露内网地址，也不再把客户端可控的 eid 送去封禁。
 			handle @playlist_create {
-				redir http://{args[4]}/emby/ban_playlist?eid={query.userId} 302
+				respond "Playlist modification is forbidden." 403
 			}
 
 			handle @playlist_items_post {
-				redir http://{args[4]}/emby/ban_playlist?eid={query.userId} 302
+				respond "Playlist modification is forbidden." 403
 			}
 
 			handle @playlist_item_delete {
-				redir http://{args[4]}/emby/ban_playlist?eid={query.userId} 302
+				respond "Playlist modification is forbidden." 403
 			}
 
 			handle @playlist_item_move {
-				redir http://{args[4]}/emby/ban_playlist?eid={query.userId} 302
+				respond "Playlist modification is forbidden." 403
 			}
+
+			# 如需保留“封禁创建播放列表的人”这个功能，请改成服务端内部转发
+			# （不再向浏览器发 302，令牌只存在于服务器之间）：
+			#
+			#   handle @playlist_create {
+			#       forward_auth {args[4]} {
+			#           uri /emby/ban_playlist?eid={query.userId}
+			#           header_up X-Internal-Token CHANGE_ME_INTERNAL_TOKEN
+			#           header_up X-Emby-Token {header.X-Emby-Token}
+			#           header_up X-Emby-Authorization {header.X-Emby-Authorization}
+			#       }
+			#       respond "Playlist modification is forbidden." 403
+			#   }
+			#
+			# ⚠️ 前提：{query.userId} 仍是客户端可控的，bot 侧必须校验该 eid 是否
+			#    属于 X-Emby-Token 对应的用户；否则任何能访问本域名的人都能封禁任意用户。
+			# ⚠️ 同时必须把 CHANGE_ME_INTERNAL_TOKEN 换成与 config.json 的
+			#    `api.internal_token` 完全一致的值，否则 bot 会返回 403。
 
 			handle @playlist_items_get {
 				header Content-Type application/json
@@ -77,6 +119,12 @@
 					header_up X-Original-URI {uri}
 					header_up X-Emby-Authorization {header.X-Emby-Authorization}
 					header_up X-Emby-Token {header.X-Emby-Token}
+					# ---- D-C1 / 契约 3.3、3.4：内部端点鉴权 ----
+					# /emby/line_report 是“反代 → bot”的内部端点，不再复用会泄露给
+					# 前端的 bot_token，改用独立内部令牌。
+					# ⚠️ CHANGE_ME_INTERNAL_TOKEN 必须与 config.json 的
+					#    `api.internal_token` 完全一致，否则 bot 返回 403、线路上报失效。
+					header_up X-Internal-Token CHANGE_ME_INTERNAL_TOKEN
 				}
 				reverse_proxy {args[3]}
 			}
@@ -89,7 +137,7 @@
 	}
 }
 # 用户只需要修改这一行参数
-# 参数1. server_name   访问域名，例如 vip.embyline.com
+# 参数1. server_name   访问域名，例如 vip.embyline.com（正式环境去掉 http:// 前缀即可启用自动 HTTPS）
 # 参数2. line_name     上报给 bot 的线路名，例如 vipline
 # 参数3. caddy_port    Caddy 监听端口，例如 8080
 # 参数4. emby_upstream Emby 地址，例如 127.0.0.1:8096

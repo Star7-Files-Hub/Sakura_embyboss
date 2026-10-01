@@ -9,7 +9,7 @@ from bot import bot, prefixes, owner, admins, LOGGER, extra_emby_libs, config
 from bot.func_helper.emby import emby
 from bot.func_helper.filters import admins_on_filter
 from bot.func_helper.fix_bottons import cr_kk_ikb, gog_rester_ikb
-from bot.func_helper.msg_utils import deleteMessage, sendMessage, editMessage
+from bot.func_helper.msg_utils import deleteMessage, sendMessage, editMessage, escape_markdown
 from bot.func_helper.utils import judge_admins, cr_link_two, tem_deluser
 from bot.sql_helper.sql_emby import sql_add_emby, sql_get_emby, sql_update_emby, Emby
 
@@ -24,7 +24,7 @@ async def user_info(_, msg):
             if not msg.sender_chat:
                 if msg.from_user.id != owner and uid == owner:
                     return await sendMessage(msg,
-                                             f"⭕ [{msg.from_user.first_name}](tg://user?id={msg.from_user.id})！不可以偷窥主人",
+                                             f"⭕ [{escape_markdown(msg.from_user.first_name)}](tg://user?id={msg.from_user.id})！不可以偷窥主人",
                                              timer=60)
             else:
                 pass
@@ -55,7 +55,7 @@ async def user_info(_, msg):
 
 
 # 封禁或者解除
-@bot.on_callback_query(filters.regex('user_ban'))
+@bot.on_callback_query(filters.regex('^user_ban-'))
 async def kk_user_ban(_, call):
     if not judge_admins(call.from_user.id):
         return await call.answer("请不要以下犯上 ok？", show_alert=True)
@@ -100,7 +100,7 @@ async def kk_user_ban(_, call):
 
 
 # 开通额外媒体库
-@bot.on_callback_query(filters.regex('embyextralib_unblock'))
+@bot.on_callback_query(filters.regex('^embyextralib_unblock-'))
 async def user_embyextralib_unblock(_, call):
     if not judge_admins(call.from_user.id):
         return await call.answer("请不要以下犯上 ok？", show_alert=True)
@@ -130,7 +130,7 @@ async def user_embyextralib_unblock(_, call):
 
 
 # 隐藏额外媒体库
-@bot.on_callback_query(filters.regex('embyextralib_block'))
+@bot.on_callback_query(filters.regex('^embyextralib_block-'))
 async def user_embyextralib_block(_, call):
     if not judge_admins(call.from_user.id):
         return await call.answer("请不要以下犯上 ok？", show_alert=True)
@@ -160,7 +160,7 @@ async def user_embyextralib_block(_, call):
 
 
 # 赠送资格
-@bot.on_callback_query(filters.regex('gift'))
+@bot.on_callback_query(filters.regex('^gift-'))
 async def gift(_, call):
     if not judge_admins(call.from_user.id):
         return await call.answer("请不要以下犯上 ok？", show_alert=True)
@@ -184,7 +184,7 @@ async def gift(_, call):
 
 
 # 删除账户
-@bot.on_callback_query(filters.regex('closeemby'))
+@bot.on_callback_query(filters.regex('^closeemby-'))
 async def close_emby(_, call):
     if not judge_admins(call.from_user.id):
         return await call.answer("请不要以下犯上 ok？", show_alert=True)
@@ -215,7 +215,7 @@ async def close_emby(_, call):
         LOGGER.info(f"【admin】：{call.from_user.id} 对 {b} 的账户 {e.name} 删除失败 ")
 
 
-@bot.on_callback_query(filters.regex('fuckoff'))
+@bot.on_callback_query(filters.regex('^fuckoff-'))
 async def fuck_off_m(_, call):
     if not judge_admins(call.from_user.id):
         return await call.answer("请不要以下犯上 ok？", show_alert=True)

@@ -65,19 +65,14 @@ def extract_host_port(url: str) -> Tuple[Optional[str], Optional[int]]:
         return None, None
 
 
-def normalize_line_url(url: str) -> str:
-    """标准化线路URL，用于比较"""
-    if not url:
-        return ""
-    url = url.lower().strip()
-    url = re.sub(r'^https?://', '', url)
-    url = url.rstrip('/')
-    return url
-
-
 def is_whitelist_line(session_server_address: str) -> bool:
     """
     检查会话使用的是否是白名单线路
+
+    按 (hostname, port) 精确比对，不使用子串匹配：
+    子串匹配会让短域名（如配置 vip.example.com 时的 example.com）被误判为白名单，
+    也会让 vip.example.com.evil.tld 这类构造出来的 host 命中白名单。
+
     :param session_server_address: 会话中的服务器地址
     :return: True 如果是白名单线路
     """
@@ -85,17 +80,21 @@ def is_whitelist_line(session_server_address: str) -> bool:
     if not whitelist_line:
         return False
 
-    session_normalized = normalize_line_url(session_server_address)
-    if not session_normalized:
+    session_host, session_port = extract_host_port(session_server_address)
+    if not session_host:
         return False
+    session_host = session_host.lower()
 
     # 支持字符串或列表两种配置格式
     lines = whitelist_line if isinstance(whitelist_line, list) else [whitelist_line]
     for line in lines:
-        whitelist_normalized = normalize_line_url(line)
-        if whitelist_normalized and (
-            whitelist_normalized in session_normalized or session_normalized in whitelist_normalized
-        ):
+        whitelist_host, whitelist_port = extract_host_port(line)
+        if not whitelist_host:
+            continue
+        if whitelist_host.lower() != session_host:
+            continue
+        # 端口：未显式配置端口时，认为该主机名的任意端口都算白名单线路
+        if whitelist_port is None or whitelist_port == session_port:
             return True
     return False
 
@@ -246,6 +245,45 @@ def find_matching_session(
     return matched_sessions[0]
 
 
+def identity_is_corroborated(
+    sessions: List[Dict[str, Any]],
+    resolved_user_id: str,
+    *,
+    token: str = "",
+    session_id: str = "",
+    play_session_id: str = "",
+) -> bool:
+    """判断 resolved_user_id 是否被"密钥型"线索证实。
+
+    `userId` 与 `deviceId` 都可以被任意请求方构造（前者来自 query，后者来自请求头），
+    仅凭它们无法证明"发起请求的人就是该用户"——否则任何人都能把线路违规栽给他人。
+    只有 token / sessionId / playSessionId 这类密钥才会与活跃会话绑定，
+    因此要求：存在一个会话，其 UserId 等于解析结果，且其 AccessToken/Id/PlaySessionId
+    与请求携带的密钥一致。
+
+    :return: True 表示身份已被证实，可以据此执行封禁/终止会话等强制动作
+    """
+    if not resolved_user_id:
+        return False
+    if not any([token, session_id, play_session_id]):
+        return False
+
+    for session in sessions:
+        if normalize_identifier(session.get("UserId")) != resolved_user_id:
+            continue
+        play_state = session.get("PlayState") or {}
+        if token and normalize_identifier(session.get("AccessToken")) == token:
+            return True
+        if session_id and normalize_identifier(session.get("Id")) == session_id:
+            return True
+        if play_session_id and (
+            normalize_identifier(session.get("PlaySessionId")) == play_session_id
+            or normalize_identifier(play_state.get("PlaySessionId")) == play_session_id
+        ):
+            return True
+    return False
+
+
 async def resolve_user_context(
     *,
     user_id: str = "",
@@ -255,8 +293,12 @@ async def resolve_user_context(
     token: str = "",
     auth_header: str = "",
     original_request_uri: str = "",
-) -> Tuple[str, Optional[Dict[str, Any]], str]:
-    """从 userId / 认证头 / 活跃会话中尽量反查用户上下文"""
+) -> Tuple[str, Optional[Dict[str, Any]], str, bool]:
+    """从 userId / 认证头 / 活跃会话中尽量反查用户上下文
+
+    :return: (resolved_user_id, matched_session, resolved_from, identity_verified)
+             identity_verified 为 True 时才允许执行强制动作（终止会话/封禁）
+    """
     auth_info = parse_emby_authorization(auth_header)
     original_query = parse_original_request_uri(original_request_uri)
     resolved_from = ""
@@ -298,14 +340,15 @@ async def resolve_user_context(
         or normalize_identifier(original_query.get("api_key"))
     )
 
-    if resolved_user_id and not any([resolved_device_id, resolved_session_id, resolved_play_session_id]):
-        return resolved_user_id, None, resolved_from
+    if resolved_user_id and not any([resolved_device_id, resolved_session_id, resolved_play_session_id, resolved_token]):
+        # 只有 query 里的 userId 可用：不足以证实身份
+        return resolved_user_id, None, resolved_from, False
 
     sessions = await fetch_active_sessions()
     if not sessions:
         if resolved_user_id and not resolved_from:
             resolved_from = "derived.before_session_lookup"
-        return resolved_user_id, None, resolved_from
+        return resolved_user_id, None, resolved_from, False
 
     matched_session = find_matching_session(
         sessions,
@@ -365,7 +408,18 @@ async def resolve_user_context(
             else:
                 resolved_from = "emby.sessions.fallback.override_bad_query_userId"
 
-    return resolved_user_id, matched_session, resolved_from
+    # 身份证实：必须由"密钥型"线索（token / sessionId / playSessionId）与活跃会话匹配，
+    # 且该会话的 UserId 与解析出的用户一致。
+    # 仅凭 query.userId 或 deviceId 命中的身份只用于展示与告警，不能据此封禁/终止会话。
+    identity_verified = identity_is_corroborated(
+        sessions,
+        resolved_user_id,
+        token=resolved_token,
+        session_id=resolved_session_id,
+        play_session_id=resolved_play_session_id,
+    )
+
+    return resolved_user_id, matched_session, resolved_from, identity_verified
 
 
 async def log_line_violation(
@@ -502,8 +556,13 @@ async def line_report(
     if not whitelist_line:
         return {"status": "skipped", "message": "No whitelist line configured"}
 
+    # 廉价前置校验：没有任何可用于识别会话的线索时直接忽略，
+    # 避免对无意义的请求做数据库查询与 Emby 会话拉取（减少放大面）。
+    if not any([userId, deviceId, sessionId, playSessionId, token, x_emby_token, x_emby_authorization]):
+        return {"status": "ignored", "message": "No identity hints"}
+
     redacted_original_request_uri = redact_request_uri(x_original_uri or "")
-    resolved_user_id, matched_session, resolved_from = await resolve_user_context(
+    resolved_user_id, matched_session, resolved_from, identity_verified = await resolve_user_context(
         user_id=userId,
         device_id=deviceId,
         session_id=sessionId,
@@ -543,6 +602,23 @@ async def line_report(
     using_whitelist = is_whitelist_line(server_address)
 
     if using_whitelist:
+        # 身份未证实时不执行任何强制动作：
+        # query.userId / deviceId 都可被请求方任意构造，据此封禁等于把违规栽给他人。
+        if not identity_verified:
+            LOGGER.warning(
+                f"线路权限疑似违规但身份无法证实，仅记录不处置: "
+                f"claimed_user={resolved_user_id}, resolved_from={resolved_from}, "
+                f"line={line}, host={host}"
+            )
+            return {
+                "status": "unverified",
+                "message": "Violation reported but identity not corroborated; no action taken",
+                "line": line,
+                "host": host,
+                "userId": resolved_user_id,
+                "resolved_from": resolved_from,
+            }
+
         # 冷却期内的重复上报直接忽略（播放器不响应终止会话时会持续上报）
         if is_in_cooldown(resolved_user_id):
             cooldown_seconds = getattr(config, "line_filter_cooldown_seconds", 60)

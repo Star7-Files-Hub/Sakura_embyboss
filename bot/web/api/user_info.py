@@ -8,11 +8,17 @@ Date:2024/8/27
 
 import json
 from fastapi import APIRouter, Request
+from bot.sql_helper import Session
 from bot.sql_helper.sql_emby import Emby, sql_get_emby, sql_update_emby
+from bot.schemas.schemas import MAX_INT_VALUE, MIN_INT_VALUE
 from bot.func_helper.emby import emby
 from bot import LOGGER, group, bot
 
 route = APIRouter()
+
+# 单次积分变动上限：防止一次请求把积分推到 32 位整数边界附近。
+# 如确有更大额度的运营需求，可调高此常量（但不要超过 MAX_INT_VALUE）。
+MAX_CREDIT_DELTA = 1_000_000
 
 
 @route.get("/user_info")
@@ -46,30 +52,69 @@ async def update_credit(request: Request):
         if not tg or credit is None:
             return {"code": 400, "message": "参数错误"}
 
+        # tg 必须是整数，避免把任意字符串当作主键查询条件
+        try:
+            tg = int(tg)
+        except (TypeError, ValueError):
+            return {"code": 400, "message": "参数错误"}
+
+        # credit 必须是整数，且有单次变动上限
+        try:
+            delta = int(credit)
+        except (TypeError, ValueError):
+            return {"code": 400, "message": "积分变动必须为整数"}
+        if delta == 0:
+            return {"code": 400, "message": "积分变动不能为 0"}
+        if abs(delta) > MAX_CREDIT_DELTA:
+            return {"code": 400, "message": f"单次积分变动不得超过 {MAX_CREDIT_DELTA}"}
+
         # 获取用户信息
         user = sql_get_emby(tg)
         if not user:
             return {"code": 404, "message": "用户不存在"}
 
-        # 计算新的积分值
-        new_iv = user.iv + int(credit)
+        # 计算新的积分值（用于提前给出友好错误）
+        new_iv = user.iv + delta
+        if not (MIN_INT_VALUE <= new_iv <= MAX_INT_VALUE):
+            return {"code": 400, "message": "积分超出允许范围"}
         if new_iv < 0:
             return {"code": 400, "message": "积分不足"}
-        # 更新用户积分
-        user.iv = new_iv
-        res = sql_update_emby(Emby.tg == tg, iv=new_iv)
-        if res:
 
-            return {
-                "code": 200,
-                "data": {"tg": user.tg, "iv": user.iv, "changed": credit},
-            }
-        else:
+        # 使用数据库侧原子自增，避免"读-算-写绝对值"在并发下丢失更新；
+        # WHERE 中带上边界条件，使余额校验与写入成为同一个原子操作。
+        try:
+            with Session() as session:
+                updated = (
+                    session.query(Emby)
+                    .filter(
+                        Emby.tg == tg,
+                        Emby.iv + delta >= 0,
+                        Emby.iv + delta <= MAX_INT_VALUE,
+                    )
+                    .update({Emby.iv: Emby.iv + delta}, synchronize_session=False)
+                )
+                session.commit()
+        except Exception as e:
+            LOGGER.error(f"更新用户 {tg} 积分失败: {e}")
             return {"code": 500, "message": "更新失败"}
+
+        if not updated:
+            # 行不存在，或并发下余额已不足以扣减
+            return {"code": 400, "message": "积分不足或用户不存在"}
+
+        # 回读真实余额（并发下 user.iv + delta 可能已不是最新值）
+        refreshed = sql_get_emby(tg)
+        current_iv = refreshed.iv if refreshed else new_iv
+        return {
+            "code": 200,
+            "data": {"tg": tg, "iv": current_iv, "changed": delta},
+        }
     except json.JSONDecodeError:
         return {"code": 400, "message": "无效的JSON格式"}
     except Exception as e:
-        return {"code": 500, "message": f"服务器错误: {str(e)}"}
+        # 不把异常原文回传给调用方，避免泄露内部路径与驱动信息
+        LOGGER.error(f"update_credit 处理失败: {e}")
+        return {"code": 500, "message": "服务器内部错误"}
 
 @route.post("/ban")
 async def ban_user(request: Request):
@@ -114,4 +159,6 @@ async def ban_user(request: Request):
     except json.JSONDecodeError:
         return {"code": 400, "message": "无效的JSON格式"}
     except Exception as e:
-        return {"code": 500, "message": f"服务器错误: {str(e)}"}
+        # 不把异常原文回传给调用方，避免泄露内部路径与驱动信息
+        LOGGER.error(f"ban_user 处理失败: {e}")
+        return {"code": 500, "message": "服务器内部错误"}

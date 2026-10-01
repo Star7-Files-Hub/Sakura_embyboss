@@ -1,20 +1,52 @@
 [Unit]
-Description=此处填写您的服务名 # 例如 embyboss
-After=mysqld.service
-After=network-online.target
+# ⚠️ 本单元是模板：请先把下面所有 /opt/embyboss 与 embyboss 替换成你的实际路径与账号，
+#    未替换前 `systemctl start` 会因为路径不存在而失败（旧版本的占位符是中文，更易误用）。
+Description=Sakura_embyboss bot
+# 数据库跑在宿主机上时保留 mysqld.service；数据库跑在 docker 里时改成 docker.service。
+# （After= 指向不存在的单元不会导致启动失败，只会失去顺序保证。）
+After=network-online.target mysqld.service
 Wants=network-online.target
 
 [Service]
 Type=simple
-WorkingDirectory=此处填写你在服务器上存放Bot的目录 # 例如/root/Sakura_embyboss/
-ExecStart=python3 此处填写入口程序 # 例如/root/Sakura_embyboss/main.py
+# ============================================================
+# 部署准备（首次启用请依次执行）：
+#   useradd -r -s /sbin/nologin -d /opt/embyboss embyboss
+#   mkdir -p /opt/embyboss && cp -r <你的bot目录>/. /opt/embyboss/
+#   chown -R embyboss:embyboss /opt/embyboss
+#   chmod 600 /opt/embyboss/config.json
+# 注意：不要部署在 /root 下——本单元启用了 ProtectHome=yes，/root 对服务不可见。
+# ============================================================
+User=embyboss
+Group=embyboss
+WorkingDirectory=/opt/embyboss
+# 用虚拟环境时改成：ExecStart=/opt/embyboss/bot-env/bin/python3 /opt/embyboss/main.py
+ExecStart=/usr/bin/python3 /opt/embyboss/main.py
 Restart=on-abnormal
-PrivateTmp=True
 RestartSec=5s
 KillMode=mixed
+PrivateTmp=True
 
-StandardOutput=null
-StandardError=syslog
+# ---------- 最小权限加固（D-M1）----------
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+LockPersonality=yes
+# bot 需要写 config.json（save_config）、log/、db_backup/，因此只放开自己的工作目录。
+# 如果你把 bot 放在别的目录，请同步修改 WorkingDirectory / ExecStart / ReadWritePaths。
+ReadWritePaths=/opt/embyboss
+
+# ---------- 日志落盘（D-M1 / D-M9）----------
+# 旧配置是 StandardOutput=null，崩溃时没有任何线索；改为交给 journald：
+#   journalctl -u embyboss -f
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=embyboss
 
 [Install]
 WantedBy=multi-user.target

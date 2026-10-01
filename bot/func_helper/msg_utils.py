@@ -196,7 +196,8 @@ async def sendFile(message, file, file_name, caption=None, buttons=None):
     except FloodWait as f:
         LOGGER.warning(str(f))
         await sleep(f.value * 1.2)
-        return await sendFile(message, file, caption)
+        # L-3：重试时必须把 file_name/caption/buttons 一并传回，否则参数错位
+        return await sendFile(message, file, file_name, caption, buttons)
     except Exception as e:
         LOGGER.error(str(e))
         return str(e)
@@ -302,7 +303,10 @@ async def callAnswer(callbackquery: CallbackQuery, query, show_alert=False):
 
 async def callListen(callbackquery, timer: int = 120, buttons=None):
     try:
-        return await callbackquery.message.chat.listen(filters.text, timeout=timer)
+        # M-4：pyromod 的 Chat.listen 绑定在 chat 上，群聊里会把任意成员的消息当成发起者的输入。
+        # 这里限定只接收回调发起者本人的文本消息。
+        return await callbackquery.message.chat.listen(
+            filters.text & filters.user(callbackquery.from_user.id), timeout=timer)
     except ListenerTimeout:
         await editMessage(callbackquery, '💦 __没有获取到您的输入__ **会话状态自动取消！**', buttons=buttons)
         return False
@@ -310,7 +314,9 @@ async def callListen(callbackquery, timer: int = 120, buttons=None):
 
 async def call_dice_listen(callbackquery, timer: int = 120, buttons=None):
     try:
-        return await callbackquery.message.chat.listen(filters.dice, timeout=timer)
+        # M-4：同上，限定只接收回调发起者本人的骰子消息
+        return await callbackquery.message.chat.listen(
+            filters.dice & filters.user(callbackquery.from_user.id), timeout=timer)
     except ListenerTimeout:
         await editMessage(callbackquery, '💦 __没有获取到您的输入__ **会话状态自动取消！**', buttons=buttons)
         return False
@@ -351,8 +357,15 @@ def escape_html_special_chars(text):
 
 
 def escape_markdown(text):
+    """转义 Markdown(legacy, ParseMode.MARKDOWN) 的特殊字符。
+
+    L-4：bot 全局使用 ParseMode.MARKDOWN（旧版 Markdown），其需要转义的字符
+    仅为 `_`、`*`、`` ` ``、`[`、`]`（与 python-telegram-bot 的 v1 转义集合一致）。
+    原先的字符集是 MarkdownV2 的集合，会对 `.`/`-`/`!` 等普通字符加反斜杠，
+    在旧版 Markdown 下可能被原样显示，故收敛为旧版 Markdown 的字符集。
+    """
     return (
-        re.sub(r"([_*\[\]()~`>\#\+\-=|{}\.!\\])", r"\\\1", html.unescape(text))
+        re.sub(r"([_*`\[\]])", r"\\\1", html.unescape(text))
         if text
         else str()
     )

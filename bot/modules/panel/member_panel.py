@@ -86,7 +86,7 @@ async def create_user(_, call, stats):
 
 
 # 键盘中转
-@bot.on_callback_query(filters.regex('members'))
+@bot.on_callback_query(filters.regex('^members$'))
 async def members(_, call):
     data = await members_info(tg=call.from_user.id)
     if not data:
@@ -107,7 +107,7 @@ async def members(_, call):
 
 
 # 创建账户
-@bot.on_callback_query(filters.regex('create') & user_in_group_on_filter)
+@bot.on_callback_query(filters.regex('^create$') & user_in_group_on_filter)
 async def create(_, call):
     """
 
@@ -148,7 +148,7 @@ async def create(_, call):
 
 
 # 换绑tg
-@bot.on_callback_query(filters.regex('changetg') & user_in_group_on_filter)
+@bot.on_callback_query(filters.regex('^changetg$|^(changetg|nochangetg)_') & user_in_group_on_filter)
 async def change_tg(_, call):
     try:
         status, current_id_str, replace_id_str = call.data.split('_')
@@ -297,7 +297,7 @@ async def change_tg(_, call):
                 f'【TG改绑】 {call.from_user.first_name}-{call.from_user.id} 通过验证账户，已递交对Emby: {emby_name}, Tg:{e.tg} 的换绑申请')
 
 
-@bot.on_callback_query(filters.regex('bindtg') & user_in_group_on_filter)
+@bot.on_callback_query(filters.regex('^bindtg$') & user_in_group_on_filter)
 async def bind_tg(_, call):
     d = sql_get_emby(tg=call.from_user.id)
     if d is not None and d.embyid is not None:
@@ -363,7 +363,7 @@ async def bind_tg(_, call):
 
 
 # kill yourself
-@bot.on_callback_query(filters.regex('delme'))
+@bot.on_callback_query(filters.regex('^delme$'))
 async def del_me(_, call):
     e = sql_get_emby(tg=call.from_user.id)
     if e is None:
@@ -395,13 +395,18 @@ async def del_me(_, call):
                 await editMessage(call, '**💢 验证不通过，安全码错误。**', re_delme_ikb)
 
 
-@bot.on_callback_query(filters.regex('delemby'))
+@bot.on_callback_query(filters.regex('^delemby-'))
 async def del_emby(_, call):
+    # A-H1：删除目标必须属于当前调用者，禁止通过回调数据指定他人 embyid
+    owner_record = sql_get_emby(tg=call.from_user.id)
+    if owner_record is None or owner_record.embyid is None or owner_record.embyid != call.data.split('-')[1]:
+        return await callAnswer(call, '💢 这不是您的账户，不许乱点！', True)
+
     send = await callAnswer(call, "🎯 get，正在删除ing。。。")
     if send is False:
         return
 
-    embyid = call.data.split('-')[1]
+    embyid = owner_record.embyid
     if await emby.emby_del(emby_id=embyid):
         sql_update_emby(Emby.embyid == embyid, embyid=None, name=None, pwd=None, pwd2=None, lv='d', cr=None, ex=None)
         tem_deluser()
@@ -417,7 +422,7 @@ async def del_emby(_, call):
 
 
 # 重置密码为空密码
-@bot.on_callback_query(filters.regex('reset'))
+@bot.on_callback_query(filters.regex('^reset$'))
 async def reset(_, call):
     e = sql_get_emby(tg=call.from_user.id)
     if e is None:
@@ -473,7 +478,7 @@ async def reset(_, call):
 
 
 # 显示/隐藏某些库
-@bot.on_callback_query(filters.regex('embyblock'))
+@bot.on_callback_query(filters.regex('^embyblock$'))
 async def embyblocks(_, call):
     data = sql_get_emby(tg=call.from_user.id)
     if not data:
@@ -518,9 +523,14 @@ async def embyblocks(_, call):
 
 
 # 隐藏
-@bot.on_callback_query(filters.regex('emby_block'))
+@bot.on_callback_query(filters.regex('^emby_block-'))
 async def user_emby_block(_, call):
-    embyid = call.data.split('-')[1]
+    # A-H2：操作目标必须属于当前调用者，禁止通过回调数据指定他人 embyid
+    owner_record = sql_get_emby(tg=call.from_user.id)
+    if owner_record is None or owner_record.embyid is None or owner_record.embyid != call.data.split('-')[1]:
+        return await callAnswer(call, '💢 这不是您的账户，不许乱点！', True)
+
+    embyid = owner_record.embyid
     send = await callAnswer(call, f'🎬 正在为您关闭显示ing')
     if send is False:
         return
@@ -541,9 +551,14 @@ async def user_emby_block(_, call):
 
 
 # 显示
-@bot.on_callback_query(filters.regex('emby_unblock'))
+@bot.on_callback_query(filters.regex('^emby_unblock-'))
 async def user_emby_unblock(_, call):
-    embyid = call.data.split('-')[1]
+    # A-H2：操作目标必须属于当前调用者，禁止通过回调数据指定他人 embyid
+    owner_record = sql_get_emby(tg=call.from_user.id)
+    if owner_record is None or owner_record.embyid is None or owner_record.embyid != call.data.split('-')[1]:
+        return await callAnswer(call, '💢 这不是您的账户，不许乱点！', True)
+
+    embyid = owner_record.embyid
     send = await callAnswer(call, f'🎬 正在为您开启显示ing')
     if send is False:
         return
@@ -608,7 +623,7 @@ async def call_wl_exchange(_, call):
         await rgs_code(_, msg, register_code=msg.text)
 
 
-@bot.on_callback_query(filters.regex('storeall'))
+@bot.on_callback_query(filters.regex('^storeall$'))
 async def do_store(_, call):
     await asyncio.gather(callAnswer(call, '✔️ 欢迎进入兑换商店'),
                          editMessage(call,
@@ -616,7 +631,22 @@ async def do_store(_, call):
                                      buttons=store_ikb()))
 
 
-@bot.on_callback_query(filters.regex('store-reborn'))
+def _is_not_expired_ban(e) -> bool:
+    """A-H6/M-6：判断 lv='c' 的账户是否**不是**「到期封禁」。
+
+    emby 表没有独立的封禁原因字段，用 e.ex（到期时间）做保守区分：
+    - 到期封禁（bot/scheduler/check_ex.py 的到期检测）只在 ex 已过期时写入 lv='c'；
+    - 未活跃封禁（bot/scheduler/userplays_rank.py 的 check_low_activity）不改动 ex，
+      因此 ex 仍在未来。
+    局限：管理员在 kk.py 手动封禁的违规用户同样不改 ex，本函数**无法**区分
+    「违规封禁」与「未活跃封禁」，彻底解决需要新增 ban_reason 列（见 W-A.md 未修复项）。
+    """
+    if e.ex is None:
+        return True
+    return e.ex > datetime.now()
+
+
+@bot.on_callback_query(filters.regex('^store-reborn$'))
 async def do_store_reborn(_, call):
     e = sql_get_emby(tg=call.from_user.id)
     if not e:
@@ -626,7 +656,7 @@ async def do_store_reborn(_, call):
     await callAnswer(call,
                      '✔️ 请仔细阅读：\n\n本功能仅为 因未活跃而被封禁的用户解封使用，到期状态下封禁的账户请勿使用，以免浪费积分。',
                      True)
-    if all([e.lv == 'c', e.iv >= _open.exchange_cost, schedall.low_activity]):
+    if all([e.lv == 'c', e.iv >= _open.exchange_cost, schedall.low_activity, _is_not_expired_ban(e)]):
         await editMessage(call,
                           f'🏪 您已满足基础要求，此次将花费 {_open.exchange_cost}{sakura_b} 解除未活跃的封禁，确认请回复 /ok，退出 /cancel')
         m = await callListen(call, 120, buttons=re_born_ikb)
@@ -636,20 +666,28 @@ async def do_store_reborn(_, call):
         elif m.text == '/cancel':
             await asyncio.gather(m.delete(), do_store(_, call))
         else:
-            sql_update_emby(Emby.tg == call.from_user.id, iv=e.iv - _open.exchange_cost, lv='b')
+            # A-H6：扣款与状态判定必须在同一把用户锁内基于最新数据完成，
+            # 否则 callListen 的 120s 窗口内可被并发请求覆盖余额（TOCTOU）
+            async with get_user_lock(call.from_user.id):
+                now_e = sql_get_emby(tg=call.from_user.id)
+                if now_e is None or now_e.lv != 'c' or now_e.iv < _open.exchange_cost:
+                    return await asyncio.gather(m.delete(), do_store(_, call),
+                                                sendMessage(call, '⚠️ 账户状态已变化（余额不足或已非封禁状态），本次操作已取消。',
+                                                            timer=20))
+                sql_update_emby(Emby.tg == call.from_user.id, iv=now_e.iv - _open.exchange_cost, lv='b')
             await emby.emby_change_policy(emby_id=e.embyid)
             LOGGER.info(f'【兑换解封】- {call.from_user.id} 已花费 {_open.exchange_cost}{sakura_b},解除封禁')
             await asyncio.gather(m.delete(), do_store(_, call),
                                  sendMessage(call, '解封成功<(￣︶￣)↗[GO!]\n此消息将在20s后自焚', timer=20))
     else:
         await sendMessage(call, '❌ 不满足以下要求！ヘ(￣ω￣ヘ)\n\n'
-                                '1. 被封禁账户\n'
+                                '1. 被封禁账户（且非到期封禁）\n'
                                 f'2. 至少持有 {_open.exchange_cost}{sakura_b}\n'
                                 f'3. 【定时策略】活跃检测开启\n'
                                 f'此消息将在20s后自焚', timer=20)
 
 
-@bot.on_callback_query(filters.regex('store-whitelist'))
+@bot.on_callback_query(filters.regex('^store-whitelist$'))
 async def do_store_whitelist(_, call):
     if _open.whitelist:
         e = sql_get_emby(tg=call.from_user.id)
@@ -662,16 +700,21 @@ async def do_store_whitelist(_, call):
                                     f'🏪 兑换规则：\n当前兑换白名单需要 {_open.whitelist_cost} {sakura_b}，已有白名单无法再次消费。勉励',
                                     True)
         await callAnswer(call, f'🏪 您已满足 {_open.whitelist_cost} {sakura_b}要求', True)
-        sql_update_emby(Emby.tg == call.from_user.id, lv='a', iv=e.iv - _open.whitelist_cost)
+        # A-H6：扣款前在用户锁内重新读取最新余额，避免并发请求覆盖彼此写入（TOCTOU）
+        async with get_user_lock(call.from_user.id):
+            now_e = sql_get_emby(tg=call.from_user.id)
+            if now_e is None or now_e.lv == 'a' or now_e.iv < _open.whitelist_cost:
+                return await sendMessage(call, '⚠️ 账户状态已变化（余额不足或已是白名单），本次操作已取消。', timer=15)
+            sql_update_emby(Emby.tg == call.from_user.id, lv='a', iv=now_e.iv - _open.whitelist_cost)
         send = await call.message.edit(f'**{random.choice(Yulv.load_yulv().wh_msg)}**\n\n'
                                        f'🎉 恭喜[{call.from_user.first_name}](tg://user?id={call.from_user.id}) 今日晋升，{ranks["logo"]}白名单')
         await send.forward(group[0])
-        LOGGER.info(f'【兑换白名单】- {call.from_user.id} 已花费 9999{sakura_b}，晋升白名单')
+        LOGGER.info(f'【兑换白名单】- {call.from_user.id} 已花费 {_open.whitelist_cost}{sakura_b}，晋升白名单')
     else:
         await callAnswer(call, '❌ 管理员未开启此兑换', True)
 
 
-@bot.on_callback_query(filters.regex('store-invite'))
+@bot.on_callback_query(filters.regex('^store-invite$'))
 async def do_store_invite(_, call):
     if _open.invite:
         e = sql_get_emby(tg=call.from_user.id)
@@ -717,10 +760,26 @@ async def do_store_invite(_, call):
                                         do_store(_, call),
                                         content.delete())
         else:
-            sql_update_emby(Emby.tg == call.from_user.id, iv=e.iv - cost)
-            links = await cr_link_one(call.from_user.id, days, count, days, method)
-            if links is None:
-                return await editMessage(call, '⚠️ 数据库插入失败，请检查数据库')
+            # A-H6：扣款必须基于用户锁内重新读取的最新余额（callListen 最长 120s，
+            # 期间其他兑换请求可能已改动 iv），发码失败时回滚扣款
+            async with get_user_lock(call.from_user.id):
+                now_e = sql_get_emby(tg=call.from_user.id)
+                if now_e is None or now_e.iv < cost:
+                    return await asyncio.gather(content.delete(),
+                                                sendMessage(call,
+                                                            f'您只有 {now_e.iv if now_e else 0}{sakura_b}，'
+                                                            f'而您需要花费 {cost}，超前消费是不可取的哦！？',
+                                                            timer=10),
+                                                do_store(_, call))
+                sql_update_emby(Emby.tg == call.from_user.id, iv=now_e.iv - cost)
+                links = await cr_link_one(call.from_user.id, days, count, days, method)
+                if links is None:
+                    # 回滚扣款，避免"币已扣、码未发"
+                    if sql_update_emby(Emby.tg == call.from_user.id, iv=now_e.iv):
+                        LOGGER.warning(f'【注册码兑换】- {call.from_user.id} 发码失败，已回滚 {cost}{sakura_b} 扣款')
+                    else:
+                        LOGGER.error(f'【注册码兑换】- {call.from_user.id} 发码失败，且回滚扣款失败，请人工核对')
+                    return await editMessage(call, '⚠️ 数据库插入失败，请检查数据库')
             links = f"🎯 {bot_name}已为您生成了 **{days}天** 注册码 {count} 个\n\n" + links
             chunks = [links[i:i + 4096] for i in range(0, len(links), 4096)]
             for chunk in chunks:
@@ -730,7 +789,7 @@ async def do_store_invite(_, call):
         await callAnswer(call, '❌ 管理员未开启此兑换', True)
 
 
-@bot.on_callback_query(filters.regex('store-query'))
+@bot.on_callback_query(filters.regex('^store-query$|^store-query:'))
 async def do_store_query(_, call):
     a, b = sql_count_c_code(tg_id=call.from_user.id)
     if not a:
@@ -741,7 +800,7 @@ async def do_store_query(_, call):
         number = 1
     await callAnswer(call, '📜 正在翻页')
     await editMessage(call, text=a[number - 1], buttons=await store_query_page(b, number))
-@bot.on_callback_query(filters.regex('^my_favorites|^page_my_favorites:'))
+@bot.on_callback_query(filters.regex('^my_favorites$|^page_my_favorites:'))
 async def my_favorite(_, call):
     # 获取页码
     if call.data == 'my_favorites':
@@ -780,7 +839,7 @@ async def my_favorite(_, call):
     total_pages = math.ceil(total_favorites / limit)
     keyboard = await favorites_page_ikb(total_pages, page)
     await editMessage(call, text, buttons=keyboard)
-@bot.on_callback_query(filters.regex('my_devices'))
+@bot.on_callback_query(filters.regex('^my_devices$'))
 async def my_devices(_, call):
     get_emby = sql_get_emby(tg=call.from_user.id)
     if get_emby is None:

@@ -1,0 +1,62 @@
+# ============================================================
+# Docker 构建上下文排除规则（D-H1 / D-L6）
+# ============================================================
+# 背景：Dockerfile 使用 `COPY . .`，构建上下文 = 仓库根目录全量。
+# 如果不在 .dockerignore 里排除，以下内容会被**永久烘焙进镜像层**：
+#   - config.json（含 bot_token / emby_api / db_pwd / tz_password 等全部密钥）
+#   - *.session（Pyrogram 登录会话，泄露等同于 Telegram 账号被接管）
+#   - log/、db_backup/（运行时数据与用户信息）
+# 注意：删除/覆盖不会从历史层移除，docker save / registry 拉取即可还原。
+#
+# 维护提示：新增需要保密的文件类型时，请同步加到这里。
+
+# ---------- 版本控制与 CI ----------
+.git/
+.github/
+
+# ---------- 生产配置与凭据（绝不可进镜像）----------
+config.json
+config.json.bak
+config.json.*
+*.session
+*.session-journal
+.env
+.env.*
+
+# ---------- 运行时产物 ----------
+log/
+db_backup/
+db/
+*.log
+caddy-local.log
+*.sql
+
+# ---------- Python 缓存 / 字节码 / 虚拟环境 ----------
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+bot-env/
+.venv/
+venv/
+
+# ---------- 文档与补丁 ----------
+docs_extra/
+*.md
+*.diff
+*.patch
+
+# ---------- 不需要进镜像的静态资源 ----------
+# 注意：image/bot2.png 是运行时兜底图片（bot/func_helper/msg_utils.py 的
+# LOCAL_PHOTO_FALLBACK），必须保留，因此这里逐个排除其余图片，
+# 而不是整体排除 image/ 目录。
+image/bixin.jpg
+image/bot_logo.png
+image/bt.png
+image/fwq.png
+image/mysql.png
+image/sakura.png
+# ranks_draw.py 只读取 resource 下的字体 / 蒙版 / 背景图，PSD 源文件不参与运行
+bot/ranks_helper/resource/cover-ranks-1.psd
+bot/ranks_helper/resource/cover-ranks-2.psd

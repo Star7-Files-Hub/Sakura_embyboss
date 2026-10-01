@@ -5,8 +5,12 @@ from bot.sql_helper import Session
 from bot.func_helper.emby import emby
 from bot import LOGGER, bot
 import json
+import re
 
 router = APIRouter()
+
+# Emby 的 Item Id 会被拼进 Emby API 路径；限制字符集避免注入额外查询参数
+_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 
 async def send_update_notification_to_user(tg_id: int, message: str):
     """发送通知到指定用户"""
@@ -66,6 +70,9 @@ async def check_and_notify_person_update(item_data: dict):
         # 获取电影/剧集ID
         item_id = item_data.get("Id", "")
         if not item_id:
+            return
+        if not _ID_PATTERN.match(str(item_id)):
+            LOGGER.warning("media webhook: item id 格式不合法，已忽略该事件")
             return
             
         # 获取演员信息
@@ -204,5 +211,5 @@ async def handle_media_webhook(request: Request):
         LOGGER.error(f"处理媒体库更新失败: {str(e)}")
         return {
             "status": "error",
-            "message": str(e)
+            "message": "媒体库更新处理失败"
         } 

@@ -26,7 +26,8 @@ async def watching_command(_, message: Message):
         result = await emby._request("GET", "/emby/Sessions")
 
         if not result.success:
-            error_text = f"**Emby 服务器状态：🔴 OFFLINE**\n\n**错误原因:** {'连接超时或未知错误'}\n请检查 Emby 服务状态或网络配置。"
+            # B-L10：把真实的失败原因透出，不再固定写成"连接超时或未知错误"
+            error_text = f"**Emby 服务器状态：🔴 OFFLINE**\n\n**错误原因:** {result.error or '连接超时或未知错误'}\n请检查 Emby 服务状态或网络配置。"
             await processing_msg.edit_text(error_text)
             return
 

@@ -117,7 +117,10 @@ class MP(BaseModel):
     lv: Optional[str] = "b"
 
 class AutoUpdate(BaseModel):
-    status: bool = True
+    # 默认关闭：开启后每天 12:30 会自动 `git pull` + `pip install` + 重启进程。
+    # 容器部署下 .git 已被 .dockerignore 排除，自动更新必然失败并在日志里刷错误；
+    # 非容器部署下这也是一条无人值守的远程代码执行路径，因此改为显式开启。
+    status: bool = False
     git_repo: Optional[str] = "berry8838/Sakura_embyboss"  # github仓库名/魔改的请填自己的仓库
     commit_sha: Optional[str] = None  # 最近一次commit
     up_description: Optional[str] = None  # 更新描述
@@ -125,15 +128,25 @@ class AutoUpdate(BaseModel):
 
 class API(BaseModel):
     status: bool = False  # 默认关闭
-    http_url: Optional[str] = "0.0.0.0"
+    # 默认只监听本机回环：反代（nginx/caddy）与 bot 同机时仍可正常访问，
+    # 但避免 API 被直接暴露到公网。确需外部直连时再显式改为 "0.0.0.0"。
+    http_url: Optional[str] = "127.0.0.1"
     http_port: Optional[int] = 8838
+    # 允许的跨域来源白名单。未设置 = 不放行任何跨域请求（同源访问不受影响）。
     allow_origins: Optional[List[Union[str, int]]] = None
+    # 内部端点令牌：反代访问 /emby/ban_playlist、/emby/line_report 时
+    # 必须通过 X-Internal-Token 请求头携带该值。
+    # 留空则仅允许回环地址（127.0.0.1 / ::1）访问内部端点。
+    internal_token: Optional[str] = None
+    # 是否开放 /docs、/redoc、/openapi.json。默认关闭，避免无鉴权泄露端点清单。
+    expose_docs: bool = False
 
     def __init__(self, **data):
         super().__init__(**data)
         if self.allow_origins is None:
-            self.allow_origins = ["*"]
-            # 如果未设置，默认为 ["*"]，为了安全可以设置成本机ip&反代的域名，列表可包含多个
+            self.allow_origins = []
+            # 未设置时不放行任何跨域来源；
+            # 若前端与 API 不同源，请在此列出其域名（不要使用 "*"）。
 class RedEnvelope(BaseModel):
     status: bool = True  # 是否开启红包
     allow_private: bool = True # 是否允许专属红包

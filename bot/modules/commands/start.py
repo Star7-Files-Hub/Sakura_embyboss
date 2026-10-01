@@ -7,7 +7,7 @@
 import asyncio
 from pyrogram import filters
 
-from bot.func_helper.emby import Embyservice
+from bot.func_helper.emby import emby
 from bot.func_helper.utils import judge_admins, members_info, open_check
 from bot.modules.commands.exchange import rgs_code
 from bot.sql_helper.sql_emby import sql_add_emby, sql_get_emby
@@ -40,7 +40,7 @@ async def my_info(_, msg):
 @bot.on_message(filters.command('count', prefixes) & user_in_group_on_filter & filters.private)
 async def count_info(_, msg):
     await deleteMessage(msg)
-    text = await Embyservice.get_medias_count()
+    text = await emby.get_medias_count()
     await sendMessage(msg, text, timer=60)
 
 

@@ -1,4 +1,20 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+注册队列测试。
+
+默认（不设任何环境变量）使用内存 stub，不会连接数据库、不会创建真实 Emby 账号——安全。
+
+⚠️ 真实模式（D-H5）：设置 `REGISTER_QUEUE_REAL=1` 后会连接 config.json 指向的数据库，
+   对 `emby` 表执行 INSERT / DELETE，并会在**生产 Emby 服务器**上真实创建/删除账号。
+   为避免误伤生产数据，现在还需要额外满足两个条件：
+     1. `REGISTER_QUEUE_REAL_I_KNOW_WHAT_I_AM_DOING=1`（显式二次确认）；
+     2. 目标库名必须包含 "test"（例如 embyboss_test），否则脚本直接拒绝执行。
+   测试主键也改成远离 Telegram ID 取值域的负数段（见 scripts/_db_safety.py）。
+   推荐用法（先把 config.json 的 db_name 指向独立测试库）：
+     REGISTER_QUEUE_REAL=1 REGISTER_QUEUE_REAL_I_KNOW_WHAT_I_AM_DOING=1 \
+       python3 scripts/test_register_queue.py
+"""
 import asyncio
 import os
 import sys
@@ -12,8 +28,15 @@ from unittest.mock import patch
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
+_SCRIPTS_DIR = Path(__file__).resolve().parent
+if str(_SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(_SCRIPTS_DIR))
+
+from _db_safety import TEST_ID_BASE, assert_test_database_name, describe_rows
 
 REAL_MODE = os.getenv("REGISTER_QUEUE_REAL") == "1"
+# D-H5：真实模式必须显式二次确认，避免"顺手跑一下"就动了生产库
+REAL_CONFIRM = os.getenv("REGISTER_QUEUE_REAL_I_KNOW_WHAT_I_AM_DOING") == "1"
 REAL_COUNT = int(os.getenv("REGISTER_QUEUE_REAL_COUNT", "50"))
 if not REAL_MODE:
     os.environ.setdefault("SAKURA_RUNNING_MIGRATIONS", "1")
@@ -21,8 +44,12 @@ if not REAL_MODE:
 from bot.func_helper import register_queue as rq
 
 if REAL_MODE:
+    from bot import db_name as _db_name
     from bot.func_helper.emby import emby
     from bot.sql_helper.sql_emby import sql_add_emby, sql_delete_emby_by_tg, sql_get_emby
+
+    # 生产库保护：库名不符测试约定时直接拒绝执行（D-H5）
+    assert_test_database_name(_db_name)
 
 
 class FakeMessage:
@@ -256,7 +283,11 @@ class RegisterQueueTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(any("账户状态已变化" in item[1] for item in message.history))
 
 
-@unittest.skipUnless(REAL_MODE, "Set REGISTER_QUEUE_REAL=1 to run the real Emby registration integration test.")
+@unittest.skipUnless(
+    REAL_MODE and REAL_CONFIRM,
+    "Set REGISTER_QUEUE_REAL=1 and REGISTER_QUEUE_REAL_I_KNOW_WHAT_I_AM_DOING=1 "
+    "to run the real Emby integration test (it writes to the database and to Emby).",
+)
 class RegisterQueueIntegrationTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.old_open = {
@@ -279,8 +310,11 @@ class RegisterQueueIntegrationTests(unittest.IsolatedAsyncioTestCase):
         rq.config.activity_check_days = 10
 
         self.messages = []
-        self.tg_ids = [int(datetime.now().timestamp()) + index for index in range(REAL_COUNT)]
-        self.usernames = [f"rqtest_{tg_id}" for tg_id in self.tg_ids]
+        # D-H5：测试主键取自远离 Telegram ID 取值域的负数段。
+        # 旧实现用 int(datetime.now().timestamp())（约 1.7e9，10 位），与真实 TG 用户 ID
+        # 同量级，DELETE 有真实概率命中真实用户记录。
+        self.tg_ids = [TEST_ID_BASE - index for index in range(REAL_COUNT)]
+        self.usernames = [f"rqtest_{index}_{abs(TEST_ID_BASE)}" for index in range(REAL_COUNT)]
         self.created_emby_ids = []
 
         async def fake_edit(message, text, buttons=None):
@@ -299,6 +333,11 @@ class RegisterQueueIntegrationTests(unittest.IsolatedAsyncioTestCase):
             item.start()
 
         for tg_id in self.tg_ids:
+            # D-H5：删除前先打印将被删除的行，便于人工核对
+            existing = sql_get_emby(tg_id)
+            if existing is not None:
+                for line in describe_rows([existing], "tg", "emby"):
+                    print(f"[cleanup] 即将删除{line}")
             sql_delete_emby_by_tg(tg_id)
             sql_add_emby(tg_id)
         self.manager = rq.RegisterQueueManager()

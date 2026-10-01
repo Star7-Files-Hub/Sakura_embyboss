@@ -5,11 +5,11 @@
 ```json
 {
   "bot_name": "xxxbot",
-  "bot_token": "5701:AAEvAHzsg30",
+  "bot_token": "123456789:AAYourBotTokenPlaceholderxxxxxxxxx",
   "owner_api": 73711,
   "owner_hash": "",
-  "owner": xxxxxxx,
-  "group": [-100xxxxxx],
+  "owner": 1234567890,
+  "group": [-1001234567890],
   "main_group": "Aaaaa_su",
   "chanel": "su_yxfy",
   "bot_photo": "https://telegra.ph/file/3b6cd2a89b652e72e0d3b.png",
@@ -93,7 +93,7 @@
   "db_docker_name": "mysql",
   "db_backup_dir": "./db_backup",
   "db_backup_maxcount": 7,
-  "w_anti_chanel_ids": [],
+  "w_anti_channel_ids": [],
   "proxy": {
     "scheme": "",
     "hostname": "",
@@ -110,7 +110,7 @@
     "price": 1
   },
   "auto_update": {
-    "status": true,
+    "status": false,
     "git_repo": "berry8838/Sakura_embyboss",
     "commit_sha": null
   },
@@ -120,9 +120,11 @@
   },
   "api": {
     "status": true,
-    "http_url": "0.0.0.0",
+    "http_url": "127.0.0.1",
     "http_port": 8838,
-    "allow_origins": ["*"]
+    "allow_origins": [],
+    "internal_token": null,
+    "expose_docs": false
   },
   "concurrent_play_limit_enabled": false,
   "concurrent_play_limit": 2,
@@ -190,6 +192,26 @@
 | `tracearr_enabled` | bool | `false` | 是否启用 Tracearr 对接 |
 | `tracearr_url` | string | `null` | Tracearr 服务地址 |
 | `tracearr_api_key` | string | `null` | Tracearr API Key |
+
+### 🔒 API 服务（`api`）
+
+| 字段 | 类型 | 默认值 | 说明 |
+|---|---|---|---|
+| `status` | bool | `false` | 是否启用内置 FastAPI 服务 |
+| `http_url` | string | `"127.0.0.1"` | **监听地址**。默认仅本机回环，让同机反代（nginx/caddy）可访问而不暴露到公网。**除非确有需要，不要改成 `"0.0.0.0"`** ——那会把你所有 API 端点（含内部端点）直接暴露到网络。 |
+| `http_port` | int | `8838` | 监听端口 |
+| `allow_origins` | list[string] | `[]` | 允许的跨域来源白名单。**默认空 = 禁止一切跨域请求**（同源访问不受影响）。若你的前端与 API 不同源，在这里逐条列出其域名，**不要使用 `["*"]`**。 |
+| `internal_token` | string | `null` | **内部端点令牌**。反代访问 `/emby/ban_playlist`、`/emby/line_report` 时必须通过 `X-Internal-Token` 请求头携带该值。留空则仅允许回环地址（`127.0.0.1`/`::1`）访问内部端点。 |
+| `expose_docs` | bool | `false` | 是否开放 `/docs`、`/redoc`、`/openapi.json`。默认关闭，避免无鉴权泄露端点与参数清单。 |
+
+> **部署提示（重要）**
+>
+> 1. 内部端点不再接受 `bot_token` 作为凭据（避免把 bot 凭据写进前端或 URL）。请在上游反代里配置 `X-Internal-Token`，取值与 `api.internal_token` 一致；例如 nginx：
+>    ```nginx
+>    proxy_set_header X-Internal-Token "你的内部令牌";
+>    ```
+> 2. 若 `api.internal_token` 留空，只有来自本机回环的请求能访问内部端点。
+> 3. `http_url` 设为 `127.0.0.1` 后，**只有同机反代/进程**能访问 API。跨机访问必须经反代，不要直接放开监听地址。
 
 ### 探针配置
 

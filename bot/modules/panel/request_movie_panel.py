@@ -8,15 +8,17 @@ from bot.sql_helper.sql_request_record import sql_add_request_record, sql_get_re
 from bot.func_helper.moviepilot import search, add_download_task 
 from bot.func_helper.emby import emby
 from bot.func_helper.utils import judge_admins
+from cacheout import Cache
 import asyncio
 import math
 
-# 添加全局字典来存储用户搜索记录
-user_search_data = {}
+# M-7：用户搜索记录改用有界缓存（cacheout 已是项目依赖），
+# 避免全局字典随使用量单调增长且永不过期
+user_search_data = Cache(maxsize=512, ttl=1800)
 ITEMS_PER_PAGE = 10
 
 
-@bot.on_callback_query(filters.regex('download_center') & user_in_group_on_filter)
+@bot.on_callback_query(filters.regex('^download_center$') & user_in_group_on_filter)
 async def call_download_center(_, call):
     if not moviepilot.status:
         return await callAnswer(call, '❌ 管理员未开启点播功能', True)
@@ -24,7 +26,7 @@ async def call_download_center(_, call):
     await editMessage(call, '🔍 欢迎进入点播中心', buttons=re_download_center_ikb)
 
 
-@bot.on_callback_query(filters.regex('get_resource') & user_in_group_on_filter)
+@bot.on_callback_query(filters.regex('^get_resource$') & user_in_group_on_filter)
 async def download_media(_, call):
     if not moviepilot.status:
         return await callAnswer(call, '❌ 管理员未开启点播功能', True)
@@ -51,7 +53,7 @@ async def download_media(_, call):
         return
 
     # 记录用户的搜索文本
-    user_search_data[call.from_user.id] = txt.text
+    user_search_data.set(call.from_user.id, txt.text)
 
     # 先查询emby库中是否存在
     await editMessage(call, '🔍 正在查询Emby库，请稍后...')
@@ -67,7 +69,7 @@ async def download_media(_, call):
     await search_site_resources(call, txt.text)
 
 
-@bot.on_callback_query(filters.regex('continue_search') & user_in_group_on_filter)
+@bot.on_callback_query(filters.regex('^continue_search$') & user_in_group_on_filter)
 async def continue_search(_, call):
     await callAnswer(call, '🔍 继续搜索')
     # 使用之前保存的搜索文本
@@ -78,16 +80,16 @@ async def continue_search(_, call):
     await search_site_resources(call, search_text)
 
 
-@bot.on_callback_query(filters.regex('cancel_search') & user_in_group_on_filter)
+@bot.on_callback_query(filters.regex('^cancel_search$') & user_in_group_on_filter)
 async def cancel_search(_, call):
     await callAnswer(call, '❌ 取消搜索')
     # 清除用户的搜索记录
-    user_search_data.pop(call.from_user.id, None)
+    user_search_data.delete(call.from_user.id)
     await editMessage(call.message, '🔍 已取消搜索', buttons=re_download_center_ikb)
-@bot.on_callback_query(filters.regex('cancel_download') & user_in_group_on_filter)
+@bot.on_callback_query(filters.regex('^cancel_download$') & user_in_group_on_filter)
 async def cancel_download(_, call):
     await callAnswer(call, '❌ 取消下载')
-    user_search_data.pop(call.from_user.id, None)
+    user_search_data.delete(call.from_user.id)
     await editMessage(call.message, '🔍 已取消下载', buttons=re_download_center_ikb)
 
 async def search_site_resources(call, keyword, page=1, all_result=None):
@@ -111,12 +113,12 @@ async def search_site_resources(call, keyword, page=1, all_result=None):
         total_pages = math.ceil(len(all_result) / ITEMS_PER_PAGE)
 
         # 保存搜索结果到用户数据
-        user_search_data[call.from_user.id] = {
+        user_search_data.set(call.from_user.id, {
             'keyword': keyword,
             'all_result': all_result,
             'current_page': page,
             'total_pages': total_pages
-        }
+        })
 
         # 显示当前页的搜索结果
         for index, item in enumerate(page_items, start=start_idx + 1):
@@ -191,12 +193,12 @@ async def handle_resource_selection(call, result):
         msg = await sendPhoto(call, photo=bot_photo, caption="【选择资源编号】：\n请在120s内对我发送你的资源编号，\n退出点 /cancel", send=True, chat_id=call.from_user.id)
         txt = await callListen(call, 120, buttons=re_download_center_ikb)
         if txt is False:
-            user_search_data.pop(call.from_user.id, None)
+            user_search_data.delete(call.from_user.id)
 
             await asyncio.gather(editMessage(msg, '🔍 已取消操作', buttons=back_members_ikb))
             return
         elif txt.text == '/cancel':
-            user_search_data.pop(call.from_user.id, None)
+            user_search_data.delete(call.from_user.id)
             await asyncio.gather(editMessage(msg, '🔍 已取消操作', buttons=back_members_ikb))
             return
         else:
@@ -212,7 +214,7 @@ async def handle_resource_selection(call, result):
                 # 兼容mp v2的api，加入了torrent_in
                 param = {**torrent_info, 'torrent_in': torrent_info}
                 success, download_id = await add_download_task(param)
-                user_search_data.pop(call.from_user.id, None)
+                user_search_data.delete(call.from_user.id)
                 if success:
                     log = f"【下载任务】：#{call.from_user.id} [{call.from_user.first_name}](tg://user?id={call.from_user.id}) 已成功添加到下载队列，此次消耗 {need_cost}{sakura_b}\n下载ID：{download_id}"
                     download_log = f"{log}\n详情：{result[index-1]['tg_log']}"
@@ -238,7 +240,10 @@ async def handle_resource_selection(call, result):
             except ValueError:
                 await editMessage(msg, '❌ 输入错误，请重新输入，退出点 /cancel', buttons=re_download_center_ikb)
                 continue
-            except:
+            except Exception as e:
+                # M-8：不要用裸 except 吞掉一切异常，记录堆栈并清理搜索缓存
+                LOGGER.exception(f"【点播】处理资源选择时出错: {e}")
+                user_search_data.delete(call.from_user.id)
                 await editMessage(msg, '❌ 呜呜呜，出错了', buttons=re_download_center_ikb)
                 return
 
@@ -246,7 +251,7 @@ async def handle_resource_selection(call, result):
 user_data = {}
 
 
-@bot.on_callback_query(filters.regex('download_rate') & user_in_group_on_filter)
+@bot.on_callback_query(filters.regex('^download_rate$') & user_in_group_on_filter)
 async def call_rate(_, call):
     if not moviepilot.status:
         return await callAnswer(call, '❌ 管理员未开启点播功能', True)
@@ -260,7 +265,7 @@ async def call_rate(_, call):
     await editMessage(call, text, buttons=request_record_page_ikb(has_prev, has_next))
 
 
-@bot.on_callback_query(filters.regex('request_record_prev') & user_in_group_on_filter)
+@bot.on_callback_query(filters.regex('^request_record_prev$') & user_in_group_on_filter)
 async def request_record_prev(_, call):
     if user_data.get(call.from_user.id) is None:
         user_data[call.from_user.id] = {'request_record_page': 1}
@@ -274,7 +279,7 @@ async def request_record_prev(_, call):
     await editMessage(call, text, buttons=request_record_page_ikb(has_prev, has_next))
 
 
-@bot.on_callback_query(filters.regex('request_record_next') & user_in_group_on_filter)
+@bot.on_callback_query(filters.regex('^request_record_next$') & user_in_group_on_filter)
 async def request_record_next(_, call):
     if user_data.get(call.from_user.id) is None:
         user_data[call.from_user.id] = {'request_record_page': 1}

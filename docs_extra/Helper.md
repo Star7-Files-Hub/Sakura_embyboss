@@ -41,18 +41,34 @@
 
 ## WebHook - 追剧推送
 
+> 🔐 **关于 token（请先读）**
+>
+> Webhook 的 URL 会出现在 Emby 日志、反向代理 access log 与浏览器历史里，因此
+> **不要在这里填 bot 的 token**。请在 `config.json` 的 `api` 段单独设置一个只用于内部调用的令牌：
+>
+> ```json
+> "api": {
+>   "status": true,
+>   "http_url": "127.0.0.1",
+>   "internal_token": "用 openssl rand -hex 32 生成的随机串"
+> }
+> ```
+>
+> 下面 URL 里的 `token=` 一律填这个 `internal_token`。
+> 若调用方支持自定义请求头，更推荐改用请求头 `X-API-Token: <令牌>`，避免令牌进入 URL 与日志。
+
 ### 添加第一个 Webhook（收藏同步）
 
 - **名称**：随便填，例如：favorites
-- **URL**：`http://192.168.2.147:8838/emby/webhook/favorites?token=这里填入bot的token`
+- **URL**：`http://192.168.2.147:8838/emby/webhook/favorites?token=这里填入api.internal_token`
   - 将 IP 地址和端口替换成自己 bot 所在的地址和端口
-  - token 填入 bot 的 token
+  - token 填入 `config.json` 里的 `api.internal_token`（**不是 bot token**）
 - **事件类型**：选中"添加到'最爱'"、"从'最爱'中移除"
 
 ### 添加第二个 Webhook（媒体更新推送）
 
 - **名称**：随便填，例如：medias
-- **URL**：`http://192.168.2.147:8838/emby/webhook/medias?token=这里填入bot的token`
+- **URL**：`http://192.168.2.147:8838/emby/webhook/medias?token=这里填入api.internal_token`
 - **事件类型**：选中"新媒体已添加"
 
 ---
@@ -62,7 +78,7 @@
 ### 添加 Webhook
 
 - **名称**：随便填，例如：client-filter
-- **URL**：`http://192.168.2.147:8838/emby/webhook/client-filter?token=这里填入bot的token`
+- **URL**：`http://192.168.2.147:8838/emby/webhook/client-filter?token=这里填入api.internal_token`
 - **事件类型**：
   - 播放：开始、暂停、取消暂停、停止
   - 用户：已验证用户身份、无法验证用户身份
@@ -106,7 +122,7 @@
 
 ### 注意事项
 
-1. 建议将管理员账号设为白名单（`lv: a`），避免被误封
+1. 白名单用户（`lv: a`）与 Emby 管理员**已被自动豁免**，不会被终止播放或封禁（无需再手工配置）
 2. 检测间隔不宜过短，避免对 Emby 服务器造成压力
 3. 与 Emby 原生的 `SimultaneousStreamLimit` 不同，本功能是在流已经开始后终止并警告
 

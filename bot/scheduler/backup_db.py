@@ -1,7 +1,5 @@
 import os
 
-import asyncio
-
 from bot import bot, owner, LOGGER, db_is_docker, db_docker_name, db_host, db_name, db_user, db_pwd, \
     db_backup_dir, db_backup_maxcount, db_port
 from bot.func_helper.backup_db_utils import BackupDBUtils
@@ -51,18 +49,24 @@ class DbBackupUtils:
         if backup_file is not None:
             LOGGER.info(f'BOT数据库备份完毕')
             try:
-                await asyncio.gather(bot.send_document(
+                await bot.send_document(
                     chat_id=owner,
                     document=backup_file,
                     caption=f'BOT数据库备份完毕',
                     disable_notification=True  # 勿打扰
-                ), bot.send_document(
-                    chat_id=owner,
-                    document='config.json',
-                    caption=f'config备份完毕',
-                    disable_notification=True  # 勿打扰
-                ))
+                )
             except Exception as e:
                 LOGGER.info(f'发送到owner失败，文件保存在本地:{e}')
+
+            # D-H4：不再把 config.json 明文发往 Telegram。
+            # 它包含 bot_token / emby_api / db_pwd / tz_password / moviepilot.access_token
+            # 等全部密钥，一旦发出就永久留在 Telegram 会话与任何已登录设备/导出记录里，
+            # 而聊天记录无法像口令那样"改一次就失效"。
+            # 需要异地保存配置时，请自行加密（如 age/gpg/openssl enc）后手动保存，
+            # 或只导出脱敏字段。
+            LOGGER.warning(
+                '已跳过 config.json 外发：为避免 bot_token/emby_api/db_pwd 等密钥泄露，'
+                '备份内容不再包含 config.json，请自行离线加密保存。'
+            )
         else:
             LOGGER.error(f'BOT数据库手动备份失败，请尽快检查相关配置')

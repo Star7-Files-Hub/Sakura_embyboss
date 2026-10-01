@@ -37,10 +37,28 @@ COPY --from=builder /usr/local/lib/python3.10/site-packages /usr/local/lib/pytho
 COPY --from=builder /usr/local/bin /usr/local/bin
 
 # 复制本地项目代码
+# 密钥（config.json）、会话（*.session）、日志（log/）等敏感内容由仓库根目录的
+# .dockerignore 排除，不再进入镜像层（D-H1）。
 COPY . .
 
-# 保持镜像体积精简，仅保留 bot 默认图片
-RUN find ./image -type f ! -name "bot2.png" -delete
+# 说明（D-L6）：旧版本此处是 `RUN find ./image -type f ! -name "bot2.png" -delete`。
+# 那些文件由上一层 COPY 写入，-delete 只会生成 whiteout 层、并不能减小镜像体积，
+# 因此已改为在 .dockerignore 中直接排除，这里不再重复清理。
+
+# 非 root 用户运行（D-M1）。
+# ⚠️ 部署提示：镜像以 uid/gid 1000 运行，挂载进容器的 config.json / log / db_backup
+# 必须对该 uid 可读写（bot 启动时会 save_config() 回写 config.json）。
+# 首次升级请执行：chown 1000:1000 config.json && chown -R 1000:1000 log db_backup
+RUN addgroup -g 1000 -S app && \
+    adduser -u 1000 -S -D -H -G app -s /sbin/nologin app && \
+    mkdir -p /app/log /app/db_backup && \
+    chown -R app:app /app
+USER app
+
+# 健康检查（D-M1）：确认 PID 1 仍是 bot 主进程（python3 main.py）。
+HEALTHCHECK --interval=60s --timeout=10s --start-period=90s --retries=3 \
+    CMD grep -qa "main.py" /proc/1/cmdline || exit 1
+
 # 设置启动命令
 ENTRYPOINT [ "python3" ]
 CMD [ "main.py" ]

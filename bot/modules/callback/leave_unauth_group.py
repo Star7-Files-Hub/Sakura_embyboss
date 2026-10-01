@@ -7,6 +7,7 @@ from pyrogram import filters
 
 from bot import bot, group, owner, LOGGER
 from bot.func_helper.fix_bottons import dp_g_ikb
+from bot.func_helper.msg_utils import escape_markdown
 
 # 定义一个集合来存储已经处理过的群组的 id
 processed_groups = set()
@@ -21,6 +22,9 @@ async def leave_bot(chat_id):
     except Exception as e:
         # 记录异常信息
         LOGGER.error(e)
+    finally:
+        # L-2：退出后释放标记，避免 processed_groups 只增不减（长期运行内存单调增长）
+        processed_groups.discard(chat_id)
 
 
 @bot.on_message(~filters.chat(group) & filters.group)
@@ -32,7 +36,7 @@ async def anti_use_bot(_, msg):
     if msg.from_user is not None:
         try:
             await bot.send_message(owner,
-                                   f"[{msg.from_user.first_name}](tg://user?id={msg.from_user.id})"
+                                   f"[{escape_markdown(msg.from_user.first_name)}](tg://user?id={msg.from_user.id})"
                                    f"[`{msg.from_user.id}`]试图将bot拉入 `{msg.chat.id}` 已被发现")
             asyncio.create_task(leave_bot(msg.chat.id))
             await bot.send_message(msg.chat.id,

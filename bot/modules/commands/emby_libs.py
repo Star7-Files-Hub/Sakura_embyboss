@@ -7,12 +7,24 @@ from bot.func_helper.msg_utils import sendMessage, deleteMessage
 from bot.sql_helper.sql_emby import get_all_emby, Emby
 from bot.func_helper.emby import emby
 
+
+def _is_confirmed(msg) -> bool:
+    """B-L11：批量修改所有用户媒体库权限属破坏性操作，需要显式 `true` 确认。"""
+    try:
+        return msg.command[1] == 'true'
+    except (IndexError, KeyError, ValueError):
+        return False
+
+
 # embylibs_block
 @bot.on_message(filters.command('embylibs_blockall', prefixes) & filters.user(owner))
 async def embylibs_blockall(_, msg):
     await deleteMessage(msg)
+    if not _is_confirmed(msg):
+        return await sendMessage(msg,
+                                 "⚠️ 此操作将关闭所有 Emby 用户的媒体库访问权限。\n如确定请使用 `/embylibs_blockall true`")
     reply = await msg.reply(f"🍓 正在处理ing····, 正在更新所有用户的媒体库访问权限")
-    rst = get_all_emby(Emby.embyid is not None)
+    rst = get_all_emby(Emby.embyid.isnot(None))
     if rst is None:
         LOGGER.info(
             f"【关闭媒体库任务】 -{msg.from_user.first_name}({msg.from_user.id}) 没有检测到任何emby账户，结束")
@@ -54,8 +66,11 @@ async def embylibs_blockall(_, msg):
 @bot.on_message(filters.command('embylibs_unblockall', prefixes) & filters.user(owner))
 async def embylibs_unblockall(_, msg):
     await deleteMessage(msg)
+    if not _is_confirmed(msg):
+        return await sendMessage(msg,
+                                 "⚠️ 此操作将开启所有 Emby 用户的媒体库访问权限。\n如确定请使用 `/embylibs_unblockall true`")
     reply = await msg.reply(f"🍓 正在处理ing····, 正在更新所有用户的媒体库访问权限")
-    rst = get_all_emby(Emby.embyid is not None)
+    rst = get_all_emby(Emby.embyid.isnot(None))
     if rst is None:
         LOGGER.info(
             f"【开启媒体库任务】 -{msg.from_user.first_name}({msg.from_user.id}) 没有检测到任何emby账户，结束")
@@ -96,9 +111,12 @@ async def embylibs_unblockall(_, msg):
 @bot.on_message(filters.command('extraembylibs_blockall', prefixes) & filters.user(owner))
 async def extraembylibs_blockall(_, msg):
     await deleteMessage(msg)
+    if not _is_confirmed(msg):
+        return await sendMessage(msg,
+                                 "⚠️ 此操作将关闭所有 Emby 用户的额外媒体库访问权限。\n如确定请使用 `/extraembylibs_blockall true`")
     reply = await msg.reply(f"🍓 正在处理ing····, 正在更新所有用户的额外媒体库访问权限")
 
-    rst = get_all_emby(Emby.embyid is not None)
+    rst = get_all_emby(Emby.embyid.isnot(None))
     if rst is None:
         LOGGER.info(
             f"【关闭额外媒体库任务】 -{msg.from_user.first_name}({msg.from_user.id}) 没有检测到任何emby账户，结束")
@@ -141,9 +159,12 @@ async def extraembylibs_blockall(_, msg):
 @bot.on_message(filters.command('extraembylibs_unblockall', prefixes) & filters.user(owner))
 async def extraembylibs_unblockall(_, msg):
     await deleteMessage(msg)
+    if not _is_confirmed(msg):
+        return await sendMessage(msg,
+                                 "⚠️ 此操作将开启所有 Emby 用户的额外媒体库访问权限。\n如确定请使用 `/extraembylibs_unblockall true`")
     reply = await msg.reply(f"🍓 正在处理ing····, 正在更新所有用户的额外媒体库访问权限")
 
-    rst = get_all_emby(Emby.embyid is not None)
+    rst = get_all_emby(Emby.embyid.isnot(None))
     if rst is None:
         LOGGER.info(
             f"【开启额外媒体库任务】 -{msg.from_user.first_name}({msg.from_user.id}) 没有检测到任何emby账户，结束")

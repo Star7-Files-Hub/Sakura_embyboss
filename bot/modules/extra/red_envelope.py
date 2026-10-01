@@ -14,7 +14,7 @@ from pyrogram import filters
 from pyrogram.types import ChatPermissions, InlineKeyboardButton, InlineKeyboardMarkup
 from sqlalchemy import func
 
-from bot import bot, prefixes, sakura_b, bot_photo, red_envelope, _open
+from bot import bot, prefixes, sakura_b, bot_photo, red_envelope, _open, LOGGER
 from bot.func_helper.filters import user_in_group_on_filter
 from bot.func_helper.fix_bottons import users_iv_button
 from bot.func_helper.msg_utils import sendPhoto, sendMessage, callAnswer, editMessage
@@ -42,6 +42,9 @@ class RedEnvelope:
         self.receivers = {}  # {user_id: {"amount": xx, "name": "xx"}}
         self.target_user = None  # 专享红包接收者ID
         self.message = None  # 红包消息（普通红包和专享红包共用）
+        # 每个红包一把锁：串行化"校验是否已领取 → 扣减池子 → 入账"整个过程，
+        # 避免同一用户快速连点导致重复领取/池子被扣成负数（TOCTOU）。
+        self.lock = asyncio.Lock()
 
 
 async def create_reds(
@@ -223,9 +226,16 @@ async def send_red_envelope(_, msg):
     await asyncio.gather(sendPhoto(msg, photo=cover, buttons=ikb), reply.delete())
 
 
-@bot.on_callback_query(filters.regex("red_envelope") & user_in_group_on_filter)
+# 锚定正则：只匹配领取按钮的 `red_envelope-{id}`。
+# 原写法 filters.regex("red_envelope") 会同时命中 config_panel 的
+# `set_red_envelope_status` / `set_red_envelope_allow_private`（它们含 "red_envelope" 子串），
+# 导致本 handler 被误触发并在 call.data.split("-")[1] 处抛 IndexError。
+@bot.on_callback_query(filters.regex(r"^red_envelope-") & user_in_group_on_filter)
 async def grab_red_envelope(_, call):
-    red_id = call.data.split("-")[1]
+    try:
+        red_id = call.data.split("-", 1)[1]
+    except IndexError:
+        return await callAnswer(call, "无效的红包数据。", True)
     try:
         envelope = red_envelopes[red_id]
     except (IndexError, KeyError):
@@ -238,53 +248,76 @@ async def grab_red_envelope(_, call):
     if not e:
         return await callAnswer(call, "你还未私聊bot! 数据库没有你.", True)
 
-    # 检查是否已领取
-    if call.from_user.id in envelope.receivers:
-        return await callAnswer(call, "ʕ•̫͡•ʔ 你已经领取过红包了。不许贪吃", True)
+    # 校验、扣减池子与入账必须在同一临界区内完成，
+    # 否则并发点击会同时通过"已领取"检查，造成重复领取与池子被扣成负数。
+    async with envelope.lock:
+        # 检查是否已领取
+        if call.from_user.id in envelope.receivers:
+            return await callAnswer(call, "ʕ•̫͡•ʔ 你已经领取过红包了。不许贪吃", True)
 
-    # 检查红包是否已抢完
-    if envelope.rest_members <= 0:
-        return await callAnswer(
-            call, "/(ㄒoㄒ)/~~ \n\n来晚了，红包已经被抢光啦。", True
-        )
+        # 检查红包是否已抢完
+        if envelope.rest_members <= 0:
+            return await callAnswer(
+                call, "/(ㄒoㄒ)/~~ \n\n来晚了，红包已经被抢光啦。", True
+            )
 
-    amount = 0
-    # 处理均分红包
-    if envelope.type == "equal":
-        amount = envelope.money // envelope.members
+        amount = 0
+        # 处理均分红包
+        if envelope.type == "equal":
+            amount = envelope.money // envelope.members
 
-    # 处理专享红包
-    elif envelope.type == "private":
-        if call.from_user.id != envelope.target_user:
-            return await callAnswer(call, "ʕ•̫͡•ʔ 这是你的专属红包吗？", True)
-        amount = envelope.rest_money
-        await callAnswer(
-            call,
-            f"🧧恭喜，你领取到了\n{envelope.sender_name} の {amount}{sakura_b}\n\n{envelope.message}",
-            True,
-        )
-
-    # 处理拼手气红包
-    else:
-        if envelope.rest_members > 1:
-            k = 2 * envelope.rest_money / envelope.rest_members
-            amount = int(random.uniform(1, k))
-        else:
+        # 处理专享红包
+        elif envelope.type == "private":
+            if call.from_user.id != envelope.target_user:
+                return await callAnswer(call, "ʕ•̫͡•ʔ 这是你的专属红包吗？", True)
             amount = envelope.rest_money
+            await callAnswer(
+                call,
+                f"🧧恭喜，你领取到了\n{envelope.sender_name} の {amount}{sakura_b}\n\n{envelope.message}",
+                True,
+            )
 
-    # 更新用户余额
-    new_balance = e.iv + amount
-    if new_balance > MAX_INT_VALUE or new_balance < MIN_INT_VALUE:
-        return await callAnswer(call, f"账户余额超出安全范围（{MIN_INT_VALUE} 到 {MAX_INT_VALUE}）。", True)
-    sql_update_emby(Emby.tg == call.from_user.id, iv=new_balance)
+        # 处理拼手气红包
+        else:
+            if envelope.rest_members > 1:
+                k = 2 * envelope.rest_money / envelope.rest_members
+                amount = int(random.uniform(1, k))
+            else:
+                amount = envelope.rest_money
 
-    # 更新红包信息
-    envelope.receivers[call.from_user.id] = {
-        "amount": amount,
-        "name": call.from_user.first_name or "Anonymous",
-    }
-    envelope.rest_money -= amount
-    envelope.rest_members -= 1
+        # 金额合法性兜底：池子不足或算出非正数时拒绝，避免负数入账
+        if amount <= 0 or amount > envelope.rest_money:
+            LOGGER.error(
+                f"红包金额异常，已拒绝发放: red_id={red_id}, amount={amount}, "
+                f"rest_money={envelope.rest_money}"
+            )
+            return await callAnswer(call, "红包数据异常，请联系管理员。", True)
+
+        # 更新用户余额：数据库侧原子自增，避免"读-算-写绝对值"丢失更新
+        new_balance = e.iv + amount
+        if new_balance > MAX_INT_VALUE or new_balance < MIN_INT_VALUE:
+            return await callAnswer(call, f"账户余额超出安全范围（{MIN_INT_VALUE} 到 {MAX_INT_VALUE}）。", True)
+        try:
+            with Session() as session:
+                updated = (
+                    session.query(Emby)
+                    .filter(Emby.tg == call.from_user.id, Emby.iv + amount <= MAX_INT_VALUE)
+                    .update({Emby.iv: Emby.iv + amount}, synchronize_session=False)
+                )
+                session.commit()
+        except Exception as ex:
+            LOGGER.error(f"红包入账失败: tg={call.from_user.id}, amount={amount}, error={ex}")
+            updated = 0
+        if not updated:
+            return await callAnswer(call, "领取失败，请稍后再试。", True)
+
+        # 更新红包信息
+        envelope.receivers[call.from_user.id] = {
+            "amount": amount,
+            "name": call.from_user.first_name or "Anonymous",
+        }
+        envelope.rest_money -= amount
+        envelope.rest_members -= 1
 
     await callAnswer(
         call, f"🧧恭喜，你领取到了\n{envelope.sender_name} の {amount}{sakura_b}", True
@@ -314,53 +347,76 @@ async def verify_red_envelope_sender(msg, money, is_private=False):
     Returns:
         tuple: (验证是否通过, 发送者名称, 错误信息)
     """
-    if not msg.sender_chat:
-        e = sql_get_emby(tg=msg.from_user.id)
-        conditions = [
-            e,  # 用户存在
-            e.iv >= money if e else False,  # 余额充足
-            money >= 5,  # 红包金额不小于5
-            e.iv >= 5 if e else False,  # 持有金额不小于5
-        ]
+    # 说明：以群组/频道身份发言（匿名管理员）时，sender_chat 非空。
+    # 这种身份无法归属到具体付款账号，此前直接放行且不扣费，
+    # 等价于"凭空铸币"——领取者会拿到真实入账的积分。
+    # 现在统一按 msg.from_user 做余额校验与扣费；无法确定付款人时直接拒绝。
+    sender = msg.from_user
+    if msg.sender_chat and sender is None:
+        return False, None, "以群组/频道身份发红包已停用，请用个人身份发送"
 
-        if is_private:
-            # 专享红包额外检查 不能发给自己
-            conditions.append(msg.reply_to_message.from_user.id != msg.from_user.id)
-        else:
-            # 普通红包额外检查
-            conditions.append(money >= int(msg.command[2]))  # 金额不小于份数
+    e = sql_get_emby(tg=sender.id)
+    conditions = [
+        e,  # 用户存在
+        e.iv >= money if e else False,  # 余额充足
+        money >= 5,  # 红包金额不小于5
+        e.iv >= 5 if e else False,  # 持有金额不小于5
+    ]
 
-        if not all(conditions):
-            error_msg = (
-                f"[{msg.from_user.first_name}](tg://user?id={msg.from_user.id}) "
-                f"违反规则，禁言一分钟。\nⅰ 所持有{sakura_b}不得小于5\nⅱ 发出{sakura_b}不得小于5"
-            )
-            if is_private:
-                error_msg += "\nⅲ 不许发自己"
-            else:
-                error_msg += "\nⅲ 未私聊过bot"
-
-            await asyncio.gather(
-                msg.delete(),
-                msg.chat.restrict_member(
-                    msg.from_user.id,
-                    ChatPermissions(),
-                    datetime.now() + timedelta(minutes=1),
-                ),
-                sendMessage(msg, error_msg, timer=60),
-            )
-            return False, None, error_msg
-
-        # 验证通过,扣除余额
-        sql_update_emby(Emby.tg == msg.from_user.id, iv=e.iv - money)
-        return True, msg.from_user.first_name, None
-
+    if is_private:
+        # 专享红包额外检查 不能发给自己
+        target = msg.reply_to_message.from_user if (
+            msg.reply_to_message and msg.reply_to_message.from_user
+        ) else None
+        if target is None:
+            return False, None, "无法识别专享红包的接收者，请回复对方的消息后再发送"
+        conditions.append(target.id != sender.id)
     else:
-        # 频道/群组发送
-        first_name = msg.chat.title if msg.sender_chat.id == msg.chat.id else None
-        if not first_name:
-            return False, None, "无法获取发送者名称"
-        return True, first_name, None
+        # 普通红包额外检查：金额不小于份数
+        try:
+            members = int(msg.command[2])
+        except (IndexError, TypeError, ValueError):
+            return False, None, "红包份数格式不正确，用法：/red 金额 份数"
+        conditions.append(money >= members)
+
+    if not all(conditions):
+        error_msg = (
+            f"[{sender.first_name}](tg://user?id={sender.id}) "
+            f"违反规则，禁言一分钟。\nⅰ 所持有{sakura_b}不得小于5\nⅱ 发出{sakura_b}不得小于5"
+        )
+        if is_private:
+            error_msg += "\nⅲ 不许发自己"
+        else:
+            error_msg += "\nⅲ 未私聊过bot"
+
+        await asyncio.gather(
+            msg.delete(),
+            msg.chat.restrict_member(
+                sender.id,
+                ChatPermissions(),
+                datetime.now() + timedelta(minutes=1),
+            ),
+            sendMessage(msg, error_msg, timer=60),
+        )
+        return False, None, error_msg
+
+    # 验证通过，扣除余额：数据库侧原子自减并带余额下限条件，
+    # 避免并发发红包导致余额被扣成负数。
+    try:
+        with Session() as session:
+            updated = (
+                session.query(Emby)
+                .filter(Emby.tg == sender.id, Emby.iv >= money)
+                .update({Emby.iv: Emby.iv - money}, synchronize_session=False)
+            )
+            session.commit()
+    except Exception as ex:
+        LOGGER.error(f"扣除红包金额失败: tg={sender.id}, money={money}, error={ex}")
+        updated = 0
+    if not updated:
+        return False, None, f"余额不足，发送失败（需要 {money}{sakura_b}）"
+
+    return True, sender.first_name or "Anonymous", None
 
 
 async def get_user_photo(user):
@@ -487,7 +543,7 @@ async def users_iv_rank():
 
 
 # 检索翻页
-@bot.on_callback_query(filters.regex("users_iv") & user_in_group_on_filter)
+@bot.on_callback_query(filters.regex(r"^users_iv:") & user_in_group_on_filter)
 async def users_iv_pikb(_, call):
     # print(call.data)
     j, tg = map(int, call.data.split(":")[1].split("_"))

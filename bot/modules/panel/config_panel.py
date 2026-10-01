@@ -8,6 +8,7 @@ from datetime import datetime
 
 from bot import bot, prefixes, bot_photo, Now, LOGGER, config, save_config, _open, auto_update, moviepilot, sakura_b
 from pyrogram import filters
+from pyrogram.types import InlineKeyboardMarkup
 
 from bot.func_helper.filters import admins_on_filter
 from bot.func_helper.fix_bottons import config_preparation, close_it_ikb, back_config_p_ikb, back_set_ikb, mp_config_ikb, client_filter_panel
@@ -21,6 +22,7 @@ from bot.sql_helper.sql_partition import (
     sql_delete_partition_code_or_grant_by_code,
     sql_clear_unused_partition_codes,
     sql_clear_used_partition_grants,
+    sql_expire_all_active_grants,
     sql_clear_all_partition_data,
 )
 from bot.func_helper.utils import pwd_create
@@ -28,6 +30,14 @@ from pyromod.helpers import ikb
 
 PARTITION_VIEW_PAGE_SIZE = 20
 PARTITION_CREATE_MAX_COUNT = 500
+
+
+def _mask_secret(value, prefix: int = 10) -> str:
+    """A-H5：面板回显凭据时一律脱敏，只保留前缀 + '...'。"""
+    if not value:
+        return '未设置'
+    value = str(value)
+    return value[:prefix] + '...' if len(value) > prefix else '已设置'
 
 
 @bot.on_message(filters.command('config', prefixes=prefixes) & admins_on_filter)
@@ -59,14 +69,14 @@ def partition_code_menu_ikb():
     return ikb([
         [('🆕 创建', 'partition_code_action_create'), ('📋 查看', 'partition_code_action_view')],
         [('🗑️ 删除', 'partition_code_action_delete'), ('🧹 清未使用', 'partition_code_action_clear_unused')],
-        [('🧯 清已使用', 'partition_code_action_clear_used'), ('💥 清除全部', 'partition_code_action_clear_all')],
+        [('🧯 清已使用', 'partition_code_action_clear_used'), ('💥 清除全部(含授权)', 'partition_code_action_clear_all')],
         [('🔙 返回', 'back_config')],
     ])
 
 
 def partition_code_clear_all_confirm_ikb():
     return ikb([
-        [('⚠️ 确认清除全部', 'partition_code_action_clear_all_confirm')],
+        [('⚠️ 确认清除码与授权', 'partition_code_action_clear_all_confirm')],
         [('🔙 取消', 'partition_code_panel')],
     ])
 
@@ -272,7 +282,11 @@ async def partition_code_clear_all(_, call):
     await callAnswer(call, "💥 清理全部")
     await editMessage(
         call,
-        "⚠️ 危险操作：将删除所有分区码。\n\n请确认是否继续？",
+        "⚠️ 危险操作（不可恢复）：\n\n"
+        "· 将删除【全部未使用的分区码】\n"
+        "· 将先【收回已发放授权对应的 Emby 媒体库权限】（被收回的用户会收到到期提醒）\n"
+        "· 再删除【已发放给用户的分区授权记录】\n\n"
+        "请确认是否继续？",
         buttons=partition_code_clear_all_confirm_ikb(),
     )
 
@@ -280,21 +294,48 @@ async def partition_code_clear_all(_, call):
 @bot.on_callback_query(filters.regex('^partition_code_action_clear_all_confirm$') & admins_on_filter)
 async def partition_code_clear_all_confirm(_, call):
     await callAnswer(call, "⚠️ 已确认，正在清理")
-    count = sql_clear_all_partition_data()
-    await editMessage(
-        call,
-        f"✅ 已清除全部分区码：{count} 条",
-        buttons=partition_code_menu_ikb(),
-    )
+    # B-M13（fail-open 修复）：必须先收回 Emby 侧权限，再删记录。
+    # check_partition_access() 只处理 status=='active' 且 expires_at<=now 的记录，
+    # 记录一旦被删就再也不会进入撤销流程，用户的媒体库权限会被**永久保留**。
+    # 因此顺序固定为：强制到期 -> 复用既有撤销链路 -> 删除记录。
+    expired_n = sql_expire_all_active_grants()
+    revoke_error = None
+    if expired_n > 0:
+        # 条数多时这一步会逐个用户调用 Emby，给管理员进度反馈
+        await editMessage(call, "⏳ 正在收回已发放授权对应的 Emby 媒体库权限……")
+        try:
+            # 局部 import：避免模块级循环导入
+            from bot.scheduler.partition_access import check_partition_access
+            await check_partition_access()
+        except Exception as e:
+            revoke_error = e
+            LOGGER.error(f"【分区清理】收回已发放授权对应的 Emby 库权限失败：{e}")
+    if revoke_error is None:
+        # 权限已全部收回（或本来就没有待收回的授权），可以安全删除授权记录。
+        # 注意 count 语义 = 分区码 + 授权记录 之和。
+        count = sql_clear_all_partition_data()
+        if expired_n > 0:
+            text = f"✅ 已收回全部授权对应的 Emby 库权限，并清除全部分区码与授权记录，共：{count} 条"
+        else:
+            text = f"✅ 已清除全部分区码与授权记录，共：{count} 条"
+    else:
+        # 撤销未全部成功：只清分区码，**保留授权记录**。
+        # 这些记录已被 sql_expire_all_active_grants() 置为到期，调度器每轮会继续重试
+        # 收回，最终收敛——不会像删记录那样永久 fail-open。
+        # 注意 count 语义 = 仅未使用的分区码（不含授权记录），文案必须与之区分。
+        count = sql_clear_unused_partition_codes()
+        text = ("⚠️ 收回权限时出错，已保留授权记录（调度器会自动重试收回），"
+                f"本次仅清除了未使用的分区码：{count} 条\n请查看日志确认。")
+    await editMessage(call, text, buttons=partition_code_menu_ikb())
 
 
-@bot.on_callback_query(filters.regex('back_config') & admins_on_filter)
+@bot.on_callback_query(filters.regex('^back_config$') & admins_on_filter)
 async def config_p_re(_, call):
     await callAnswer(call, "✅ config")
     await editMessage(call, "🌸 欢迎回来！\n\n👇点击你要修改的内容。", buttons=config_preparation())
 
 
-@bot.on_callback_query(filters.regex("log_out") & admins_on_filter)
+@bot.on_callback_query(filters.regex("^log_out$") & admins_on_filter)
 async def log_out(_, call):
     await callAnswer(call, '🌐查询中...')
     # file位置以main.py为准
@@ -306,7 +347,7 @@ async def log_out(_, call):
     LOGGER.info(f"【admin】：{call.from_user.id} - 导出日志成功！")
 
 
-@bot.on_callback_query(filters.regex("set_tz$") & admins_on_filter)
+@bot.on_callback_query(filters.regex("^set_tz$") & admins_on_filter)
 async def set_tz(_, call):
     """显示探针设置菜单"""
     from pyromod.helpers import ikb
@@ -345,7 +386,7 @@ async def set_tz(_, call):
     await editMessage(call, text, buttons=keyboard)
 
 
-@bot.on_callback_query(filters.regex("set_tz_version_v0") & admins_on_filter)
+@bot.on_callback_query(filters.regex("^set_tz_version_v0$") & admins_on_filter)
 async def set_tz_version_v0(_, call):
     """设置使用 Nezha V0 API"""
     config.tz_version = 'v0'
@@ -355,7 +396,7 @@ async def set_tz_version_v0(_, call):
     await set_tz(_, call)
 
 
-@bot.on_callback_query(filters.regex("set_tz_version_v1") & admins_on_filter)
+@bot.on_callback_query(filters.regex("^set_tz_version_v1$") & admins_on_filter)
 async def set_tz_version_v1(_, call):
     """设置使用 Nezha V1 API"""
     config.tz_version = 'v1'
@@ -365,7 +406,7 @@ async def set_tz_version_v1(_, call):
     await set_tz(_, call)
 
 
-@bot.on_callback_query(filters.regex("set_tz_version_komari") & admins_on_filter)
+@bot.on_callback_query(filters.regex("^set_tz_version_komari$") & admins_on_filter)
 async def set_tz_version_komari(_, call):
     """设置使用 Komari API"""
     config.tz_version = 'komari'
@@ -375,7 +416,7 @@ async def set_tz_version_komari(_, call):
     await set_tz(_, call)
 
 
-@bot.on_callback_query(filters.regex("set_tz_params") & admins_on_filter)
+@bot.on_callback_query(filters.regex("^set_tz_params$") & admins_on_filter)
 async def set_tz_params(_, call):
     """设置探针参数"""
     await callAnswer(call, '📝 设置探针参数')
@@ -421,7 +462,7 @@ async def set_tz_params(_, call):
                 config.tz_id = s_tzid
                 save_config()
                 await editMessage(call,
-                                  f"【Nezha V0 探针设置完成】\n\n【网址】\n{s_tz}\n\n【api_token】\n{s_tzapi}\n\n【检测的ids】\n{config.tz_id} **Done！**",
+                                  f"【Nezha V0 探针设置完成】\n\n【网址】\n{s_tz}\n\n【api_token】\n{_mask_secret(s_tzapi)}\n\n【检测的ids】\n{config.tz_id} **Done！**",
                                   buttons=back_config_p_ikb)
             elif config.tz_version == 'v1':
                 s_username = c[1].strip()
@@ -444,7 +485,7 @@ async def set_tz_params(_, call):
                 config.tz_api = s_tzapi
                 config.tz_id = s_tzid
                 save_config()
-                api_display = s_tzapi if s_tzapi else '未设置 (使用公开接口)'
+                api_display = _mask_secret(s_tzapi) if s_tzapi else '未设置 (使用公开接口)'
                 await editMessage(call,
                                   f"【Komari 探针设置完成】\n\n【网址】\n{s_tz}\n\n【API Key】\n{api_display}\n\n【检测的节点】\n{config.tz_id if config.tz_id else '全部节点'} **Done！**",
                                   buttons=back_config_p_ikb)
@@ -503,7 +544,7 @@ async def set_whitelist_emby_line(_, call):
         LOGGER.info(f"【admin】：{call.from_user.id} - 更新白名单线路为{config.emby_whitelist_line}设置完成")
 
 # 设置需要显示/隐藏的库
-@bot.on_callback_query(filters.regex('set_block') & admins_on_filter)
+@bot.on_callback_query(filters.regex('^set_block$') & admins_on_filter)
 async def set_block(_, call):
     await callAnswer(call, '📺 设置显隐媒体库')
     send = await editMessage(call,
@@ -575,7 +616,7 @@ async def set_block(_, call):
 #             LOGGER.info(f'【admin】：{txt.from_user.id} - 更新了购买按钮设置 {user_buy.button}')
 
 
-@bot.on_callback_query(filters.regex('set_update') & admins_on_filter)
+@bot.on_callback_query(filters.regex('^set_update$') & admins_on_filter)
 async def set_auto_update(_, call):
     try:
         # 简化逻辑，只设置一次
@@ -619,7 +660,7 @@ async def set_mp_status(_, call):
         moviepilot.status = not moviepilot.status
         if moviepilot.status:
             message = '👮🏻‍♂️ 您已开启 MoviePilot 点播功能'
-            scheduler.add_job(sync_download_tasks, 'interval', seconds=60, id='sync_download_tasks')
+            scheduler.add_job(sync_download_tasks, 'interval', seconds=60, id='sync_download_tasks', replace_existing=True)
         else:
             message = '👮🏻‍♂️ 您已关闭 MoviePilot 点播功能'
             scheduler.remove_job(job_id='sync_download_tasks')
@@ -656,7 +697,7 @@ async def set_mp_price(_, call):
         await editMessage(call, "❌ 请输入有效的数字")
         await mp_config_panel(_, call)
 
-@bot.on_callback_query(filters.regex('set_mp_lv') & admins_on_filter)
+@bot.on_callback_query(filters.regex('^set_mp_lv$') & admins_on_filter)
 async def set_mp_lv(_, call):
     """设置用户权限"""
     moviepilot.lv = 'a' if moviepilot.lv == 'b' else 'b'
@@ -665,7 +706,7 @@ async def set_mp_lv(_, call):
     save_config()
     await mp_config_panel(_, call)
 
-@bot.on_callback_query(filters.regex('set_mp_log_channel') & admins_on_filter)
+@bot.on_callback_query(filters.regex('^set_mp_log_channel$') & admins_on_filter)
 async def set_mp_log_channel(_, call):
     """设置日志频道"""
     await callAnswer(call, '📝 设置日志频道')
@@ -690,7 +731,7 @@ async def set_mp_log_channel(_, call):
         await mp_config_panel(_, call)
 
 
-@bot.on_callback_query(filters.regex('leave_ban') & admins_on_filter)
+@bot.on_callback_query(filters.regex('^leave_ban$') & admins_on_filter)
 async def open_leave_ban(_, call):
     # 切换状态
     _open.leave_ban = not _open.leave_ban
@@ -708,7 +749,7 @@ async def open_leave_ban(_, call):
     LOGGER.info(log_message)
 
 
-@bot.on_callback_query(filters.regex('set_uplays') & admins_on_filter)
+@bot.on_callback_query(filters.regex('^set_uplays$') & admins_on_filter)
 async def set_user_playrank(_, call):
     _open.uplays = not _open.uplays
     if not _open.uplays:
@@ -724,7 +765,7 @@ async def set_user_playrank(_, call):
     LOGGER.info(log_message)
 
 
-@bot.on_callback_query(filters.regex('set_kk_gift_days') & admins_on_filter)
+@bot.on_callback_query(filters.regex('^set_kk_gift_days$') & admins_on_filter)
 async def set_kk_gift_days(_, call):
     await callAnswer(call, '📌 设置赠送资格天数')
     send = await editMessage(call,
@@ -754,7 +795,7 @@ async def set_kk_gift_days(_, call):
             LOGGER.info(f"【admin】：{call.from_user.id} - 更新赠送资格天数完成")
 
 
-@bot.on_callback_query(filters.regex('set_fuxx_pitao') & admins_on_filter)
+@bot.on_callback_query(filters.regex('^set_fuxx_pitao$') & admins_on_filter)
 async def set_fuxx_pitao(_, call):
     config.fuxx_pitao = not config.fuxx_pitao
     if not config.fuxx_pitao:
@@ -768,7 +809,7 @@ async def set_fuxx_pitao(_, call):
     await config_p_re(_, call)
     save_config()
     LOGGER.info(log_message)
-@bot.on_callback_query(filters.regex('set_red_envelope_status') & admins_on_filter)
+@bot.on_callback_query(filters.regex('^set_red_envelope_status$') & admins_on_filter)
 async def set_red_envelope_status(_, call):
     config.red_envelope.status = not config.red_envelope.status
     if config.red_envelope.status:
@@ -782,7 +823,7 @@ async def set_red_envelope_status(_, call):
     save_config()
     LOGGER.info(log_message)
 
-@bot.on_callback_query(filters.regex('set_red_envelope_allow_private') & admins_on_filter)
+@bot.on_callback_query(filters.regex('^set_red_envelope_allow_private$') & admins_on_filter)
 async def set_red_envelope_allow_private(_, call):
     config.red_envelope.allow_private = not config.red_envelope.allow_private
     if config.red_envelope.allow_private:
@@ -796,7 +837,7 @@ async def set_red_envelope_allow_private(_, call):
     save_config()
     LOGGER.info(log_message)
 
-@bot.on_callback_query(filters.regex('set_activity_check_days') & admins_on_filter)
+@bot.on_callback_query(filters.regex('^set_activity_check_days$') & admins_on_filter)
 async def set_activity_check_days(_, call):
     await callAnswer(call, '📌 设置活跃检测天数')
     send = await editMessage(call,
@@ -925,7 +966,7 @@ async def toggle_concurrent_play_limit(_, call):
         from bot.func_helper.scheduler import scheduler
         from bot.modules.extra.concurrent_play_monitor import check_concurrent_play_limit
         interval = config.concurrent_play_check_interval
-        scheduler.add_job(check_concurrent_play_limit, 'interval', seconds=interval, id='concurrent_play_check')
+        scheduler.add_job(check_concurrent_play_limit, 'interval', seconds=interval, id='concurrent_play_check', replace_existing=True)
     else:
         message = '🎬 您已关闭 同时播放限制功能'
         log_message = f"【admin】：管理员 {call.from_user.first_name} 已关闭 同时播放限制功能"
@@ -1040,7 +1081,7 @@ async def set_concurrent_play_check_interval(_, call):
             scheduler.remove_job(job_id='concurrent_play_check')
         except Exception:
             pass
-        scheduler.add_job(check_concurrent_play_limit, 'interval', seconds=seconds, id='concurrent_play_check')
+        scheduler.add_job(check_concurrent_play_limit, 'interval', seconds=seconds, id='concurrent_play_check', replace_existing=True)
     await editMessage(call, f"✅ 检测间隔已设置为 **{seconds}** 秒", buttons=back_config_p_ikb)
     LOGGER.info(f"【admin】：{call.from_user.id} - 更新检测间隔为{seconds}秒")
     await set_concurrent_play_limit_panel(_, call)

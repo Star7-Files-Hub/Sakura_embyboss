@@ -98,18 +98,22 @@ async def audit_ip_command(_, message: Message):
         report_text += f"**👥 发现用户:** {len(result)} 个\n\n"
         
         # 按活动时间排序
-        sorted_users = sorted(result, key=lambda x: x['LastActivity'], reverse=True)
+        sorted_users = sorted(result, key=lambda x: str(x.get('LastActivity') or ''), reverse=True)
         
         report_text += "**📋 用户活动详情:**\n"
         report_text += "=" * 40 + "\n"
         
         for i, user_info in enumerate(sorted_users, 1):
-            # 格式化最后活动时间
-            try:
-                last_activity = datetime.fromisoformat(user_info['LastActivity'].replace('Z', '+00:00'))
-                formatted_time = last_activity.strftime('%Y-%m-%d %H:%M:%S')
-            except (ValueError, TypeError, KeyError):
-                formatted_time = user_info['LastActivity']
+            # 格式化最后活动时间（B-M12：LastActivity 可能为 None/未知，不能用 .replace 直接处理）
+            last_activity_raw = user_info.get('LastActivity')
+            if not last_activity_raw:
+                formatted_time = '未知'
+            else:
+                try:
+                    last_activity = datetime.fromisoformat(str(last_activity_raw).replace('Z', '+00:00'))
+                    formatted_time = last_activity.strftime('%Y-%m-%d %H:%M:%S')
+                except (ValueError, TypeError, KeyError):
+                    formatted_time = last_activity_raw
             
             report_text += f"**{i}. {user_info['Username']}**\n"
             report_text += f"   • 用户ID: `{user_info['UserId']}`\n"
@@ -148,17 +152,28 @@ async def audit_device_name_command(_, message: Message):
     """
     try:
         # 解析命令参数
-        args = message.text.split(None, 2)  # 使用 None 和限制分割次数，支持包含空格的设备名
-        if len(args) < 2:
+        # B-L12：原来的 split(None, 2) 会把含空格的设备名截断，并对非数字的剩余部分报"天数必须是数字"。
+        # 现改为：最后一个 token 若是纯数字则当作天数，其余全部作为关键词。
+        parts = message.text.split()[1:]
+        days = None
+        if len(parts) > 1 and parts[-1].isdigit():
+            days = int(parts[-1])
+            if days <= 0 or days > 3650:
+                await sendMessage(message, "❌ 天数参数必须在 1-3650 之间")
+                return
+            parts = parts[:-1]
+        device_keyword = " ".join(parts).strip()
+        if not device_keyword:
             help_text = (
                 "**🔍 设备名 审计命令使用说明**\n\n"
                 "**用法:** `/auditdevice <设备名关键词> [天数]`\n\n"
                 "**参数说明:**\n"
-                "• `设备名关键词` - 要搜索的设备名 关键词（必需）\n"
-                "• `天数` - 查询天数范围，默认全部时间（可选）\n\n"
+                "• `设备名关键词` - 要搜索的设备名 关键词（必需，可含空格）\n"
+                "• `天数` - 查询天数范围，默认全部时间（可选，写在最后）\n\n"
                 "**示例:**\n"
                 "• `/auditdevice Chrome` - 查询使用 Chrome 浏览器的用户的活动\n"
                 "• `/auditdevice Android 7` - 查询最近7天使用 Android 设备的用户的活动\n"
+                "• `/auditdevice Xiaomi Pad` - 查询使用 Xiaomi Pad 设备的用户的活动\n"
                 "• `/auditdevice Emby` - 查询使用 Emby 客户端的用户的活动\n\n"
                 "**功能:**\n"
                 "• 根据设备名 查找相关用户\n"
@@ -167,19 +182,6 @@ async def audit_device_name_command(_, message: Message):
             )
             await sendMessage(message, help_text)
             return
-
-        device_keyword = args[1]
-        days = None
-        # 解析天数参数
-        if len(args) >= 3:
-            try:
-                days = int(args[2])
-                if days <= 0 or days > 3650:
-                    await sendMessage(message, "❌ 天数参数必须在 1-3650 之间")
-                    return
-            except ValueError:
-                await sendMessage(message, "❌ 天数参数必须是有效的数字")
-                return
 
         # 发送处理中消息
         processing_msg = await message.reply(f"🔍 正在审计包含 `{device_keyword}` 的设备名 {days if days else '所有时间'} 的使用情况...")
@@ -213,7 +215,7 @@ async def audit_device_name_command(_, message: Message):
         report_text += f"**👥 发现用户:** {len(result)} 个\n\n"
         
         # 按活动时间排序
-        sorted_users = sorted(result, key=lambda x: x['LastActivity'], reverse=True)
+        sorted_users = sorted(result, key=lambda x: str(x.get('LastActivity') or ''), reverse=True)
         
         report_text += "**📋 用户详情:**\n"
         report_text += "=" * 40 + "\n"
@@ -222,12 +224,16 @@ async def audit_device_name_command(_, message: Message):
         unique_device_names = set()
         
         for i, user_info in enumerate(sorted_users, 1):
-            # 格式化最后活动时间
-            try:
-                last_activity = datetime.fromisoformat(user_info['LastActivity'].replace('Z', '+00:00'))
-                formatted_time = last_activity.strftime('%Y-%m-%d %H:%M:%S')
-            except (ValueError, TypeError, KeyError):
-                formatted_time = user_info['LastActivity']
+            # 格式化最后活动时间（B-M12：LastActivity 可能为 None/未知，不能用 .replace 直接处理）
+            last_activity_raw = user_info.get('LastActivity')
+            if not last_activity_raw:
+                formatted_time = '未知'
+            else:
+                try:
+                    last_activity = datetime.fromisoformat(str(last_activity_raw).replace('Z', '+00:00'))
+                    formatted_time = last_activity.strftime('%Y-%m-%d %H:%M:%S')
+                except (ValueError, TypeError, KeyError):
+                    formatted_time = last_activity_raw
             
             device_name_value = user_info.get('DeviceName', '未知')
             unique_device_names.add(device_name_value)
@@ -283,18 +289,27 @@ async def audit_client_name_command(_, message: Message):
     """
     try:
         # 解析命令参数
-        args = message.text.split(None, 2)  # 使用 None 和限制分割次数，支持包含空格的客户端名
-        if len(args) < 2:
+        # B-L12：同 auditdevice，最后一个纯数字 token 视为天数，其余作为关键词（支持含空格的客户端名）
+        parts = message.text.split()[1:]
+        days = None
+        if len(parts) > 1 and parts[-1].isdigit():
+            days = int(parts[-1])
+            if days <= 0 or days > 3650:
+                await sendMessage(message, "❌ 天数参数必须在 1-3650 之间")
+                return
+            parts = parts[:-1]
+        client_keyword = " ".join(parts).strip()
+        if not client_keyword:
             help_text = (
                 "**🔍 客户端名审计命令使用说明**\n\n"
                 "**用法:** `/auditclient <客户端名关键词> [天数]`\n\n"
                 "**参数说明:**\n"
-                "• `客户端名关键词` - 要搜索的客户端名关键词（必需）\n"
-                "• `天数` - 查询天数范围，默认查询所有时间（可选）\n\n"
+                "• `客户端名关键词` - 要搜索的客户端名关键词（必需，可含空格）\n"
+                "• `天数` - 查询天数范围，默认查询所有时间（可选，写在最后）\n\n"
                 "**示例:**\n"
                 "• `/auditclient Chrome` - 查询使用 Chrome 浏览器的用户\n"
                 "• `/auditclient Android 7` - 查询最近7天使用 Android 客户端的用户\n"
-                "• `/auditclient Emby` - 查询使用 Emby 客户端的用户\n"
+                "• `/auditclient Emby Web` - 查询使用 Emby Web 客户端的用户\n"
                 "• `/auditclient Web` - 查询使用 Web 客户端的用户\n\n"
                 "**功能:**\n"
                 "• 根据客户端名查找相关用户\n"
@@ -303,19 +318,6 @@ async def audit_client_name_command(_, message: Message):
             )
             await sendMessage(message, help_text)
             return
-
-        client_keyword = args[1]
-        days = None
-        # 解析天数参数
-        if len(args) >= 3:
-            try:
-                days = int(args[2])
-                if days <= 0 or days > 3650:
-                    await sendMessage(message, "❌ 天数参数必须在 1-3650 之间")
-                    return
-            except ValueError:
-                await sendMessage(message, "❌ 天数参数必须是有效的数字")
-                return
 
         # 发送处理中消息
         processing_msg = await message.reply(f"🔍 正在审计包含 `{client_keyword}` 的客户端名 {days if days else '所有时间'} 的使用情况...")
@@ -349,7 +351,7 @@ async def audit_client_name_command(_, message: Message):
         report_text += f"**👥 发现用户:** {len(result)} 个\n\n"
         
         # 按活动时间排序
-        sorted_users = sorted(result, key=lambda x: x['LastActivity'], reverse=True)
+        sorted_users = sorted(result, key=lambda x: str(x.get('LastActivity') or ''), reverse=True)
         
         report_text += "**📋 用户详情:**\n"
         report_text += "=" * 40 + "\n"
@@ -358,12 +360,16 @@ async def audit_client_name_command(_, message: Message):
         unique_client_names = set()
         
         for i, user_info in enumerate(sorted_users, 1):
-            # 格式化最后活动时间
-            try:
-                last_activity = datetime.fromisoformat(user_info['LastActivity'].replace('Z', '+00:00'))
-                formatted_time = last_activity.strftime('%Y-%m-%d %H:%M:%S')
-            except (ValueError, TypeError, KeyError):
-                formatted_time = user_info['LastActivity']
+            # 格式化最后活动时间（B-M12：LastActivity 可能为 None/未知，不能用 .replace 直接处理）
+            last_activity_raw = user_info.get('LastActivity')
+            if not last_activity_raw:
+                formatted_time = '未知'
+            else:
+                try:
+                    last_activity = datetime.fromisoformat(str(last_activity_raw).replace('Z', '+00:00'))
+                    formatted_time = last_activity.strftime('%Y-%m-%d %H:%M:%S')
+                except (ValueError, TypeError, KeyError):
+                    formatted_time = last_activity_raw
             
             client_name_value = user_info.get('ClientName', '未知')
             unique_client_names.add(client_name_value)

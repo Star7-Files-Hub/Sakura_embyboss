@@ -1,0 +1,24 @@
+# Dependabot 配置（D-L3 / D-M2 / D-M3）
+#
+# 作用：
+#   1) github-actions：让 Actions 从"浮动 tag"逐步过渡到固定版本/固定 commit，
+#      并在有安全更新时自动开 PR（D-L3 建议的 "action 固定到 commit SHA（Dependabot 管理）"）。
+#   2) pip：requirements.txt 已从 UTF-16 转为 UTF-8（D-M2），
+#      Dependabot 现在才能真正解析它并给出依赖漏洞告警（D-M3）。
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "ci"
+
+  - package-ecosystem: "pip"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "deps"

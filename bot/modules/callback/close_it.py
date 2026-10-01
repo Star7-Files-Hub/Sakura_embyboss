@@ -8,7 +8,7 @@ from bot.func_helper.utils import judge_admins
 
 
 # 使用装饰器语法来定义回调函数，并传递 client 和 call 参数
-@bot.on_callback_query(filters.regex('closeit'))
+@bot.on_callback_query(filters.regex('^closeit$'))
 async def close_it(_, call):
     if call.message.chat.type is ChatType.PRIVATE:
         await deleteMessage(call)

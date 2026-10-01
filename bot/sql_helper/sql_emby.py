@@ -36,8 +36,10 @@ def sql_add_emby(tg: int):
             emby = Emby(tg=tg)
             session.add(emby)
             session.commit()
-        except:
-            pass
+        except Exception as e:
+            # B-L1：不再静默吞异常（例如唯一键冲突或 B-C1 的缺列）
+            session.rollback()
+            LOGGER.debug(f"添加emby记录跳过 tg={tg}: {e}")
 
 def sql_delete_emby_by_tg(tg):
     """
@@ -69,6 +71,7 @@ def sql_clear_emby_iv():
             session.commit()
             return True
         except Exception as e:
+            session.rollback()
             LOGGER.error(f"清除所有emby的iv时发生异常 {e}")
             return False
 
@@ -162,7 +165,8 @@ def sql_get_emby(tg):
             # 使用or_方法来表示或者的逻辑，如果有tg就用tg，如果有embyid就用embyid，如果有name就用name，如果都没有就返回None
             emby = session.query(Emby).filter(or_(Emby.tg == tg, Emby.name == tg, Emby.embyid == tg)).first()
             return emby
-        except:
+        except Exception as e:
+            LOGGER.error(f"查询emby记录失败 tg={tg}: {e}")
             return None
 
 
@@ -194,7 +198,8 @@ def get_all_emby(condition):
         try:
             embies = session.query(Emby).filter(condition).all()
             return embies
-        except:
+        except Exception as e:
+            LOGGER.error(f"查询emby记录列表失败: {e}")
             return None
 
 
@@ -204,17 +209,23 @@ def sql_update_emby(condition, **kwargs):
     """
     with Session() as session:
         try:
-            # 用filter来过滤，注意要加括号
-            emby = session.query(Emby).filter(condition).first()
-            if emby is None:
+            if not kwargs:
                 return False
-            # 然后用setattr方法来更新其他的字段，如果有就更新，如果没有就保持原样
-            for k, v in kwargs.items():
-                setattr(emby, k, v)
+            # B-L3：拒绝 None/True 这类"全表条件"，避免误更新任意一行
+            if condition is None or condition is True:
+                LOGGER.error("sql_update_emby: 非法更新条件（None/True），已拒绝执行")
+                return False
+            # B-M4：改为数据库端单条 UPDATE。原实现是"读出来 -> setattr -> commit"，
+            # 并发续期/派发时会用旧快照覆盖别人的写入（丢更新）。
+            matched = session.query(Emby.tg).filter(condition).first()
+            if matched is None:
+                return False
+            session.query(Emby).filter(Emby.tg == matched[0]).update(kwargs, synchronize_session=False)
             session.commit()
             return True
         except Exception as e:
-            LOGGER.error(e)
+            session.rollback()
+            LOGGER.error(f"更新emby记录失败: {e}")
             return False
 
 
@@ -248,7 +259,7 @@ def sql_count_emby():
                 func.count(case((Emby.lv == "a", 1))).label("lv_a_count")
             ).first()
         except Exception as e:
-            # print(e)
+            LOGGER.error(f"统计emby记录数量失败: {e}")
             return None, None, None
         else:
             return count.tg_count, count.embyid_count, count.lv_a_count

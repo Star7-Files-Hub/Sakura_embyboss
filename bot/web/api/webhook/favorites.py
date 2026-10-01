@@ -4,8 +4,12 @@ from bot.sql_helper.sql_emby import Emby
 from bot.sql_helper import Session
 from bot import LOGGER, bot
 import json
+import re
 
 router = APIRouter()
+
+# Emby 的 Item/User Id 会被拼进 Emby API 路径；限制字符集避免注入额外查询参数
+_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 
 async def send_favorite_notification(tg_id: int, embyname: str, item_name: str, is_favorite: bool):
     """发送收藏通知到Telegram"""
@@ -52,6 +56,14 @@ async def handle_favorite_webhook(request: Request):
         embyname = user_data.get("Name", "")
         item_id = item_data.get("Id", "")
         item_name = item_data.get("Name", "")
+
+        # 校验 id 格式，避免把任意字符串拼进 Emby API 路径（如附加 &Fields=... 之类参数）
+        if embyid and not _ID_PATTERN.match(str(embyid)):
+            LOGGER.warning("favorites webhook: user id 格式不合法，已忽略该事件")
+            return {"status": "ignored", "message": "Invalid user id"}
+        if item_id and not _ID_PATTERN.match(str(item_id)):
+            LOGGER.warning("favorites webhook: item id 格式不合法，已忽略该事件")
+            return {"status": "ignored", "message": "Invalid item id"}
         
         # 检查收藏状态
         is_favorite = item_data.get("UserData", {}).get("IsFavorite", False)
@@ -113,5 +125,5 @@ async def handle_favorite_webhook(request: Request):
         LOGGER.error(f"处理Webhook失败: {str(e)}")
         return {
             "status": "error",
-            "message": str(e)
+            "message": "Webhook处理失败"
         }

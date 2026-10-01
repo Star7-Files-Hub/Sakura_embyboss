@@ -96,7 +96,7 @@ async def find_sth_media(_, inline_query: InlineQuery):
         pass
 
 
-@bot.on_callback_query(filters.regex('favorited'))
+@bot.on_callback_query(filters.regex('^favorited:'))
 async def favorite_item(_, call):
     item_id = call.data.split(':')[1]
     try:

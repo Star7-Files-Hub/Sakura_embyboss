@@ -1,5 +1,6 @@
 import requests
 import json
+from urllib.parse import quote, urlencode
 from bot import LOGGER, moviepilot, save_config
 import aiohttp
 import asyncio
@@ -41,12 +42,23 @@ async def _do_request(request):
                     return await _do_request(request)
                 return None
             return await response.json()
+def _login_sync(url, payload, headers):
+    """同步的登录请求，放到线程里执行，避免阻塞事件循环。"""
+    return requests.post(url, data=payload, headers=headers, timeout=TIMEOUT)
+
+
 async def login():
     url = f"{mp.url}/api/v1/login/access-token"
-    payload = f"username={mp.username}&password={mp.password}"
+    # 用户名/密码必须做表单编码，否则包含 & = # 等字符时会构造出错误的请求体
+    payload = urlencode({"username": mp.username or "", "password": mp.password or ""})
     headers = {'Content-Type': 'application/x-www-form-urlencoded'}
-    response = requests.post(url, data=payload, headers=headers, timeout=TIMEOUT)
-    result = response.json()
+    try:
+        # 原实现直接调用同步 requests，会阻塞整个 asyncio 事件循环（含 bot 消息处理）
+        response = await asyncio.to_thread(_login_sync, url, payload, headers)
+        result = response.json()
+    except Exception as e:
+        LOGGER.error(f"MP 登录请求失败: {e}")
+        return False
     if 'access_token' in result:
         mp.access_token = result['token_type'] + ' ' + result['access_token']
         moviepilot.access_token = mp.access_token # 保存到config
@@ -70,7 +82,8 @@ async def search(title):
     if title is None:
         return False, []
         
-    url = f"{mp.url}/api/v1/search/title?keyword={title}"
+    # 关键词必须 URL 编码：否则关键词里的 & # 空格 等字符会改变查询语义（可注入额外参数）
+    url = f"{mp.url}/api/v1/search/title?keyword={quote(str(title), safe='')}"
     headers = {'Authorization': mp.access_token}
     request = {'method': 'GET', 'url': url, 'headers': headers}
     try:
@@ -153,7 +166,7 @@ async def get_download_task():
         LOGGER.error(f"MP 获取下载任务失败: {e}")
         return None
 async def get_history_transfer_task_by_title_download_id(title, download_id, page = 1, count = 50):
-    url = f"{mp.url}/api/v1/history/transfer?title={title}&page={page}&count={count}"
+    url = f"{mp.url}/api/v1/history/transfer?title={quote(str(title), safe='')}&page={page}&count={count}"
     headers = {'Authorization': mp.access_token}
     request = {'method': 'GET', 'url': url, 'headers': headers}
     try:

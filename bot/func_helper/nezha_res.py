@@ -10,6 +10,9 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+# 同步探针请求的超时（秒）：避免探针不可达时永久阻塞
+TIMEOUT = 15
+
 
 class KomariAPI:
     """Komari 探针 API 客户端"""
@@ -264,7 +267,8 @@ def sever_info_v0(tz, tz_api, tz_id):
         for x in tz_id:
             tz_url = f'{tz}/api/v1/server/details?id={x}'
             # 发送GET请求，获取服务器流量信息
-            res = r.get(tz_url, headers=tz_headers).json()
+            # 必须设置 timeout：探针不可达时无超时的同步请求会永久挂住事件循环
+            res = r.get(tz_url, headers=tz_headers, timeout=TIMEOUT).json()
             detail = res["result"][0]
             """cpu"""
             uptime = f'{int(detail["status"]["Uptime"] / 86400)} 天' if detail["status"]["Uptime"] != 0 else '⚠️掉线辣'
@@ -288,7 +292,9 @@ def sever_info_v0(tz, tz_api, tz_id):
                          f"· 🌊 流量 | ↓{NetInTransfer}  ↑{NetOutTransfer}\n"
             b.append(dict(name=f'{detail["name"]}', id=detail["id"], server=status_msg))
         return b
-    except:
+    except Exception as e:
+        # 原实现是裸 except，会把所有错误（含解析失败、超时、鉴权失败）静默吞掉
+        logger.error(f"Nezha V0 获取服务器信息异常: {e}")
         return None
 
 
@@ -369,7 +375,7 @@ async def sever_info(tz, tz_api, tz_id, tz_version="v0", tz_username=None, tz_pa
     :param tz_password: V1 密码
     :return: 服务器信息列表
     """
-    print(f"使用探针 API 版本: {tz_version}")
+    logger.debug(f"使用探针 API 版本: {tz_version}")
     if tz_version == "v1":
         # V1 使用异步调用
         return await sever_info_v1_async(tz, tz_username, tz_password, tz_id)
@@ -377,5 +383,6 @@ async def sever_info(tz, tz_api, tz_id, tz_version="v0", tz_username=None, tz_pa
         # Komari 使用异步调用
         return await sever_info_komari_async(tz, tz_api, tz_id)
     else:
-        # 默认使用 V0 API (同步调用)
-        return sever_info_v0(tz, tz_api, tz_id)
+        # 默认使用 V0 API。
+        # V0 用的是同步 requests，必须丢到线程里执行，否则会阻塞整个事件循环。
+        return await asyncio.to_thread(sever_info_v0, tz, tz_api, tz_id)

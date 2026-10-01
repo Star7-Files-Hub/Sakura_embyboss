@@ -48,8 +48,22 @@ async def renew_all(_, msg):
         LOGGER.info(
             f"【派送任务】 - {msg.from_user.first_name}({msg.from_user.id}) 派出 {a} 天 * {b} 更改用时{times:.3f} s")
         for l in ls:
-            await bot.send_message(l[0], f"🎯 管理员 {msg.from_user.first_name} 调节了您的账户 到期时间：{a}天"
-                                         f'\n📅 实时到期：{l[1].strftime("%Y-%m-%d %H:%M:%S")}')
+            # B-L7：私发消息必须处理 FloodWait，否则一个限流会中断整批派送
+            try:
+                await bot.send_message(l[0], f"🎯 管理员 {msg.from_user.first_name} 调节了您的账户 到期时间：{a}天"
+                                             f'\n📅 实时到期：{l[1].strftime("%Y-%m-%d %H:%M:%S")}')
+            except FloodWait as f:
+                LOGGER.warning(str(f))
+                await asyncio.sleep(f.value * 1.2)
+                try:
+                    await bot.send_message(l[0], f"🎯 管理员 {msg.from_user.first_name} 调节了您的账户 到期时间：{a}天"
+                                                 f'\n📅 实时到期：{l[1].strftime("%Y-%m-%d %H:%M:%S")}')
+                except Exception as e:
+                    LOGGER.error(f"派送任务私发消息失败：{l[0]} {e}")
+                    continue
+            except Exception as e:
+                LOGGER.error(f"派送任务私发消息失败：{l[0]} {e}")
+                continue
         LOGGER.info(
             f"【派送任务】 - {msg.from_user.first_name}({msg.from_user.id}) 派出 {a} 天 * {b}，消息私发完成")
     else:
@@ -84,7 +98,7 @@ async def coins_all(_, msg):
     start = time.perf_counter()
     for i in rst:
         b += 1
-        iv_new = i.iv + coin
+        iv_new = int(i.iv or 0) + coin
         ls.append([i.tg, iv_new])
     if sql_update_embys(some_list=ls, method='iv'):
         end = time.perf_counter()
@@ -194,9 +208,9 @@ async def call_all(_, msg):
     if not call or call.text == '/cancel':
         return await msg.reply('好的,您已取消操作.')
     elif call.text == '2':
-        chat_members = get_all_emby(Emby.tg is not None)
+        chat_members = get_all_emby(Emby.tg.isnot(None)) or []
     elif call.text == '1':
-        chat_members = get_all_emby(Emby.embyid is not None)
+        chat_members = get_all_emby(Emby.embyid.isnot(None)) or []
     reply = await msg.reply('开始执行发送......')
     a = 0
     start = time.perf_counter()

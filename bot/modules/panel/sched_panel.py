@@ -14,10 +14,41 @@ from bot.scheduler import *
 
 
 # 初始化命令 开机检查重启
-loop = asyncio.get_event_loop()
-loop.call_later(5, lambda: loop.create_task(BotCommands.set_commands(client=bot)))
-loop.call_later(5, lambda: loop.create_task(check_restart()))
-loop.call_later(8, lambda: loop.create_task(warmup_peer_cache()))
+# D-M7：不再在模块导入期用 loop.call_later 注册开机任务。
+# 导入期拿到的循环不一定是 bot.run() 真正使用的那个（Pyrogram 2.x 会在 Client 构造时
+# 取一次 asyncio.get_event_loop()），一旦不一致，下面这些回调会**静默永不触发**：
+#   - BotCommands.set_commands 不执行 → Telegram 命令菜单为空
+#   - check_restart 不执行 → schedall.restart_chat_id 永远不清零，重启提示残留
+#   - warmup_peer_cache 不执行 → 冷启动时 peer 解析失败率升高
+# 现在改为显式启动钩子，由 main.py 在 bot 启动后调用（见 startup_tasks 的文档字符串）。
+async def startup_tasks():
+    """
+    开机任务（D-M7）。
+
+    必须由 main.py 的启动钩子显式调用，例如：
+
+        async def _on_startup():
+            await asyncio.sleep(2)
+            from bot.func_helper.scheduler import scheduler
+            from bot.modules.panel.sched_panel import startup_tasks
+            scheduler.start()          # D-M7：显式启动调度器（幂等）
+            await startup_tasks()
+
+    这里保留原先 call_later(5/5/8) 的"等待 bot 连接完成"语义，但改由调用方控制时机。
+    """
+    await asyncio.sleep(3)
+    try:
+        await asyncio.gather(
+            BotCommands.set_commands(client=bot),
+            check_restart(),
+        )
+    except Exception as e:
+        LOGGER.error(f"开机任务执行失败（set_commands / check_restart）: {e}")
+    await asyncio.sleep(1)
+    try:
+        await warmup_peer_cache()
+    except Exception as e:
+        LOGGER.error(f"开机任务执行失败（warmup_peer_cache）: {e}")
 
 # 启动定时任务
 auto_backup_db = DbBackupUtils.auto_backup_db
@@ -57,6 +88,12 @@ args_dict = {
 
 
 def set_all_sche():
+    """把 schedall 里开启的任务注册进调度器。
+
+    D-M7：调度器已不在导入期 start()，所以这里只是把任务暂存进 APScheduler 的
+    pending 列表（APScheduler 会打印 "Adding job tentatively"），
+    真正生效要等 main.py 的启动钩子调用 `scheduler.start()`。
+    """
     for key, value in action_dict.items():
         if getattr(schedall, key):
             action = action_dict[key]
@@ -209,6 +246,13 @@ async def execute(command, pass_error=True):
 from sys import executable, argv
 
 
+# D-H3 说明：这个定时任务（每天 12:30）在 `auto_update.status` 为 True 时，会**自动**
+# 执行 `git pull` + `pip install` + 重启进程，没有任何二次确认。
+# `bot/schemas/schemas.py` 里 `AutoUpdate.status` 的默认值是 True（该文件归 Lead），
+# 因此请在 config.json 中显式设置 `"auto_update": {"status": false, ...}`，
+# 只保留手动的 `/update_bot true`。
+# 另：D-H1 的 .dockerignore 已排除 `.git/`，容器内不再有 git 仓库，
+# 容器部署下的自动更新本身也会失败（详见 remediation/W-D.md 的风险提示）。
 @scheduler.SCHEDULER.scheduled_job('cron', hour='12', minute='30', id='update_bot')
 async def update_bot(force: bool = False, msg: Message = None, manual: bool = False):
     """
@@ -253,6 +297,20 @@ async def update_bot(force: bool = False, msg: Message = None, manual: bool = Fa
 
 @bot.on_message(filters.command('update_bot', prefixes) & admins_on_filter)
 async def get_update_bot(_, msg: Message):
+    # D-H3：更新流程会执行 `git fetch --all` / `git pull --all` +
+    # `pip install -r requirements.txt`，然后**重启整个进程**（os.execl），
+    # 且会拉取 git_repo 指向的远端代码并直接执行。必须显式二次确认，
+    # 避免误触（与 /check_ex、/low_activity 的确认风格保持一致）。
+    confirm = msg.command[1] if len(msg.command) > 1 else None
+    if confirm != 'true':
+        return await msg.reply(
+            '⚠️ `update_bot` 会执行：\n'
+            '  1. `git fetch --all` / `git pull --all`（拉取 auto_update.git_repo 的远端代码）\n'
+            '  2. `pip install -r requirements.txt`\n'
+            '  3. 重启当前进程（会中断正在进行的所有任务）\n'
+            '请先确认：仓库没有未提交的本地改动、git_repo 指向的是可信仓库。\n'
+            '确认无误请发送：`/update_bot true`'
+        )
     delete_task = msg.delete()
     send_task = bot.send_message(chat_id=msg.chat.id, text='正在更新bot代码，请稍等。。。')
     results = await asyncio.gather(delete_task, send_task)

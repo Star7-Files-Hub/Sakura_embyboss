@@ -17,7 +17,7 @@ from bot.func_helper.msg_utils import callAnswer, editMessage, sendPhoto, callLi
 from bot.func_helper.utils import open_check, cr_link_one, rn_link_one, wl_link_one
 
 
-@bot.on_callback_query(filters.regex('manage') & admins_on_filter)
+@bot.on_callback_query(filters.regex('^manage$') & admins_on_filter)
 async def gm_ikb(_, call):
     await callAnswer(call, '✔️ manage面板')
     stat, all_user, tem, timing = await open_check()
@@ -35,7 +35,7 @@ async def gm_ikb(_, call):
 
 
 # 开关注册
-@bot.on_callback_query(filters.regex('open-menu') & admins_on_filter)
+@bot.on_callback_query(filters.regex('^open-menu$') & admins_on_filter)
 async def open_menu(_, call):
     await callAnswer(call, '®️ register面板')
     # [开关，注册总数，定时注册] 此间只对emby表中tg用户进行统计
@@ -51,7 +51,7 @@ async def open_menu(_, call):
         save_config()
 
 
-@bot.on_callback_query(filters.regex('open_stat') & admins_on_filter)
+@bot.on_callback_query(filters.regex('^open_stat$') & admins_on_filter)
 async def open_stats(_, call):
     stat, all_user, tem, timing = await open_check()
     if timing != 0:
@@ -87,7 +87,7 @@ async def open_stats(_, call):
 change_for_timing_task = None
 
 
-@bot.on_callback_query(filters.regex('open_timing') & admins_on_filter)
+@bot.on_callback_query(filters.regex('^open_timing$') & admins_on_filter)
 async def open_timing(_, call):
     global change_for_timing_task
     if _open.timing == 0:
@@ -167,7 +167,7 @@ async def change_for_timing(timing, tgid, call):
         await deleteMessage(send1, 30)
 
 
-@bot.on_callback_query(filters.regex('all_user_limit') & admins_on_filter)
+@bot.on_callback_query(filters.regex('^all_user_limit$') & admins_on_filter)
 async def open_all_user_l(_, call):
     await callAnswer(call, '⭕ 限制人数')
     send = await call.message.edit(
@@ -192,7 +192,7 @@ async def open_all_user_l(_, call):
         save_config()
         await editMessage(call, f"✔️ 成功，您已设置 **注册总人数 {a}**", buttons=back_free_ikb)
         LOGGER.info(f"【admin】：管理员 {call.from_user.first_name} 调整了总人数限制：{a}")
-@bot.on_callback_query(filters.regex('open_us') & admins_on_filter)
+@bot.on_callback_query(filters.regex('^open_us$') & admins_on_filter)
 async def open_us(_, call):
     await callAnswer(call, '🤖开放账号天数')
     send = await call.message.edit(
@@ -317,7 +317,7 @@ def _parse_delete_codes_input(text: str):
     raise ValueError
 
 
-@bot.on_callback_query(filters.regex('cr_link') & admins_on_filter)
+@bot.on_callback_query(filters.regex('^cr_link$') & admins_on_filter)
 async def cr_link(_, call):
     await callAnswer(call, '✔️ 创建注册码/续期码/白名单码')
     send = await editMessage(call,
@@ -382,7 +382,7 @@ async def cr_link(_, call):
 
 
 # 检索
-@bot.on_callback_query(filters.regex('ch_link') & admins_on_filter)
+@bot.on_callback_query(filters.regex('^ch_link$') & admins_on_filter)
 async def ch_link(_, call):
     await callAnswer(call, '🔍 查看管理们注册码...时长会久一点', True)
     a, b, c, d, f, e = sql_count_code()
@@ -390,8 +390,11 @@ async def ch_link(_, call):
     text = f'**🎫 常用code数据：\n• 已使用 - {a}  | • 未使用 - {e}\n• 月码 - {b}   | • 季码 - {c} \n• 半年码 - {d}  | • 年码 - {f}**'
     text += f'\n\n**📦 按类型统计：**\n{_format_code_type_counts(type_stats)}'
     ls = []
-    admins.append(owner)
-    for i in admins:
+    # M-5：不要改动全局 admins 列表（并发/异常会导致 owner 残留或误删），改用局部副本迭代
+    targets = list(admins)
+    if owner not in targets:
+        targets.append(owner)
+    for i in targets:
         name = await bot.get_chat(i)
         a, b, c, d, f ,e= sql_count_code(i)
         type_stats = sql_count_code_types(i) or {
@@ -407,14 +410,13 @@ async def ch_link(_, call):
         ls.append(f)
     if call.from_user.id == owner:
         ls.append(["🚮 删除未使用码", "delete_codes"])
-    admins.remove(owner)
     keyboard = ch_link_ikb(ls)
     text += '\n详情查询 👇'
 
     await editMessage(call, text, buttons=keyboard)
 
 # 删除未使用码
-@bot.on_callback_query(filters.regex('delete_codes') & admins_on_filter)
+@bot.on_callback_query(filters.regex('^delete_codes$') & admins_on_filter)
 async def delete_unused_codes(_, call):
     await callAnswer(call, '⚠️ 请确认要删除码的类别')
     if call.from_user.id != owner:
@@ -459,7 +461,7 @@ async def delete_unused_codes(_, call):
     await editMessage(call, text, buttons=keyboard)
 
 
-@bot.on_callback_query(filters.regex('ch_admin_link'))
+@bot.on_callback_query(filters.regex('^ch_admin_link-'))
 async def ch_admin_link(client, call):
     i = int(call.data.split('-')[1])
     if call.from_user.id != owner and call.from_user.id != i:
@@ -474,34 +476,45 @@ async def ch_admin_link(client, call):
 
 
 @bot.on_callback_query(
-    filters.regex('register_mon') | filters.regex('register_sea')
-    | filters.regex('register_half') | filters.regex('register_year') | filters.regex('register_used') | filters.regex('register_unused'))
+    (filters.regex('^register_mon_') | filters.regex('^register_sea_')
+     | filters.regex('^register_half_') | filters.regex('^register_year_') | filters.regex('^register_used_')
+     | filters.regex('^register_unused_')) & admins_on_filter)
 async def buy_mon(_, call):
-    await call.answer('✅ 显示注册码')
     cd, times, u = call.data.split('_')
+    # A-H3：注册码明文只能由本人检索，禁止用回调数据里的 tg id 拉取他人注册码
+    try:
+        target = int(u)
+    except ValueError:
+        return await call.answer('⚠️ 参数错误', show_alert=True)
+    if call.from_user.id != owner and target != call.from_user.id:
+        return await call.answer('🚫 你怎么偷窥别人呀! 你又不是owner', show_alert=True)
+
+    await call.answer('✅ 显示注册码')
     n = getattr(ExDate(), times)
-    a, i = sql_count_p_code(u, n)
+    a, i = sql_count_p_code(target, n)
     if a is None:
         x = '**空**'
     else:
         x = a[0]
-    first = await bot.get_chat(u)
+    first = await bot.get_chat(target)
     keyboard = await cr_paginate(i, 1, n)
     await sendMessage(call, f'🔎当前 {first.first_name} - **{n}**天，检索出以下 **{i}**页：\n\n{x}', keyboard)
 
 
 # 检索翻页
-@bot.on_callback_query(filters.regex('pagination_keyboard'))
+@bot.on_callback_query(filters.regex('^pagination_keyboard:') & admins_on_filter)
 async def paginate_keyboard(_, call):
     j, mode = map(int, call.data.split(":")[1].split('_'))
     await callAnswer(call, f'好的，将为您翻到第 {j} 页')
     a, b = sql_count_p_code(call.from_user.id, mode)
+    if a is None:
+        return await callAnswer(call, '❌ 空', True)
     keyboard = await cr_paginate(b, j, mode)
     text = a[j-1]
     await editMessage(call, f'🔎当前模式- **{mode}**天，检索出以下 **{b}**页链接：\n\n{text}', keyboard)
 
 
-@bot.on_callback_query(filters.regex('set_renew') & admins_on_filter)
+@bot.on_callback_query(filters.regex('^set_renew') & admins_on_filter)
 async def set_renew(_, call):
     await callAnswer(call, '🚀 续期设置')
     try:
@@ -513,7 +526,7 @@ async def set_renew(_, call):
     finally:
         await editMessage(call, text='⭕ **关于用户组的续期功能**\n\n选择点击下方按钮开关任意兑换功能',
                           buttons=cr_renew_ikb())
-@bot.on_callback_query(filters.regex('set_freeze_days') & admins_on_filter)
+@bot.on_callback_query(filters.regex('^set_freeze_days$') & admins_on_filter)
 async def set_freeze_days(_, call):
     await callAnswer(call, '⭕ 设置封存天数')
     send = await call.message.edit(
@@ -539,7 +552,7 @@ async def set_freeze_days(_, call):
         await editMessage(call, f"✔️ 成功，您已设置 **封存账号天数 {a}**", buttons=back_free_ikb)
         LOGGER.info(f"【admin】：管理员 {call.from_user.first_name} 调整了封存账号天数：{a}")
 
-@bot.on_callback_query(filters.regex('set_invite_lv'))
+@bot.on_callback_query(filters.regex('^set_invite_lv') & admins_on_filter)
 async def invite_lv_set(_, call):
     try:
         method = call.data
@@ -550,7 +563,8 @@ async def invite_lv_set(_, call):
                 _open.invite_lv = level
                 save_config()
                 await callAnswer(call, f'✅ 已设置邀请等级为 {level}', show_alert=True)
-        await callAnswer(call, '🚀 进入邀请等级设置')
+        else:
+            await callAnswer(call, '🚀 进入邀请等级设置')
         # 当点击设置邀请等级按钮时
         await editMessage(call, 
             "请选择邀请等级:\n\n"
@@ -563,7 +577,7 @@ async def invite_lv_set(_, call):
         return
     except IndexError:
         pass
-@bot.on_callback_query(filters.regex('set_checkin_lv'))
+@bot.on_callback_query(filters.regex('^set_checkin_lv') & admins_on_filter)
 async def checkin_lv_set(_, call):
     try:
         method = call.data
@@ -574,7 +588,8 @@ async def checkin_lv_set(_, call):
                 _open.checkin_lv = level
                 save_config()
                 await callAnswer(call, f'✅ 已设置签到等级为 {level}', show_alert=True)
-        await callAnswer(call, '🚀 进入签到等级设置')
+        else:
+            await callAnswer(call, '🚀 进入签到等级设置')
         # 当点击设置签到等级按钮时
         await editMessage(call, 
             "请选择签到等级:\n\n"

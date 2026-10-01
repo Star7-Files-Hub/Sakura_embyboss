@@ -12,7 +12,7 @@ from bot.func_helper.fix_bottons import cr_page_server
 from bot.func_helper.msg_utils import callAnswer, editMessage
 
 
-@bot.on_callback_query(filters.regex('server') & user_in_group_on_filter)
+@bot.on_callback_query(filters.regex('^server$|^server:') & user_in_group_on_filter)
 async def server(_, call):
     data = sql_get_emby(tg=call.from_user.id)
     if not data:

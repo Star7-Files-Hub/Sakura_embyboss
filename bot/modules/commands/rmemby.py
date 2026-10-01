@@ -30,10 +30,15 @@ async def rmemby_user(_, msg):
 
     if e.embyid is not None:
         first = await bot.get_chat(e.tg)
+        sign_name = f'{msg.sender_chat.title}' if msg.sender_chat else f'[{msg.from_user.first_name}](tg://user?id={msg.from_user.id})'
         if await emby.emby_del(emby_id=e.embyid):
-            sql_update_emby(Emby.embyid == e.embyid, embyid=None, name=None, pwd=None, pwd2=None, lv='d', cr=None, ex=None)
+            # 远端账号已删除，名额计数照常回收
             tem_deluser()
-            sign_name = f'{msg.sender_chat.title}' if msg.sender_chat else f'[{msg.from_user.first_name}](tg://user?id={msg.from_user.id})'
+            # B-H5：检查数据库更新返回值；条件改用主键 tg，避免 NULL 比较误命中（B-L3）
+            if not sql_update_emby(Emby.tg == e.tg, embyid=None, name=None, pwd=None, pwd2=None, lv='d', cr=None, ex=None):
+                LOGGER.error(f"管理员 {sign_name} 删除远端账号成功，但数据库更新失败: tg={e.tg}")
+                await reply.edit(f"⚠️ Emby 账号已删除，但数据库记录更新失败，请用 `/only_rm_record {e.tg}` 手工清理。")
+                return
             try:
                 await reply.edit(
                     f'🎯 done，管理员  {sign_name} 已将 [{first.first_name}](tg://user?id={e.tg}) 账户 {e.name} 删除。')
@@ -90,19 +95,31 @@ async def only_rm_emby(_, msg):
     await deleteMessage(msg)
     try:
         emby_id = msg.command[1]
+        confirm = msg.command[2] if len(msg.command) > 2 else None
     except (IndexError, ValueError):
-        return await sendMessage(msg, "❌ 使用格式：/only_rm_emby embyid或者embyname")
-    
-    res = await emby.emby_del(emby_id=emby_id)
-    if not res:
-        # 使用 emby_name 获取此用户的 emby_id
+        return await sendMessage(msg, "❌ 使用格式：/only_rm_emby embyid [true]")
+
+    # B-M8：不可恢复的删除操作加显式确认（与 /paolu /banall 等危险命令一致）
+    if confirm != 'true':
+        return await sendMessage(
+            msg,
+            "⚠️ 此操作将直接删除 Emby 账号（不可恢复，且不会自动清理数据库记录）。\n"
+            f"如确定请使用 `/only_rm_emby {emby_id} true`")
+
+    sign_name = f'{msg.sender_chat.title}' if msg.sender_chat else f'[{msg.from_user.first_name}](tg://user?id={msg.from_user.id})'
+
+    # B-M8：仅当确认该 ID 不存在（404）时才按用户名兜底，避免"删除失败（网络/服务异常）后误删同名账号"
+    exists, info = await emby.user(emby_id=emby_id)
+    if not exists:
+        error_text = info.get('error', '') if isinstance(info, dict) else str(info)
+        if '资源不存在' not in error_text:
+            return await sendMessage(msg, f"❌ 无法确认 Emby 账号 {emby_id} 是否存在：{error_text}")
         success, embyuser = await emby.get_emby_user_by_name(emby_name=emby_id)
         if not success:
             return await sendMessage(msg, f"❌ 未找到此用户 {emby_id} 的记录")
-        res = await emby.emby_del(emby_id=embyuser.get("Id"))
-        if not res:
-            return await sendMessage(msg, f"❌ 删除用户 {emby_id} 失败")
-        sign_name = f'{msg.sender_chat.title}' if msg.sender_chat else f'[{msg.from_user.first_name}](tg://user?id={msg.from_user.id})'
-        await sendMessage(msg, f"管理员 {sign_name} 已删除用户 {emby_id} 的Emby账号")
-        LOGGER.info(
-            f"管理员 {sign_name} 删除了用户 {emby_id} 的Emby账号")
+        emby_id = embyuser.get("Id")
+
+    if not await emby.emby_del(emby_id=emby_id):
+        return await sendMessage(msg, f"❌ 删除用户 {emby_id} 失败（可能是 Emby 服务异常），请稍后重试")
+    await sendMessage(msg, f"管理员 {sign_name} 已删除用户 {emby_id} 的Emby账号")
+    LOGGER.info(f"管理员 {sign_name} 删除了用户 {emby_id} 的Emby账号")

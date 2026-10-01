@@ -1,0 +1,53 @@
+name: Repository hygiene checks
+
+# D-M2 / D-H2 的回归护栏：
+#   - requirements.txt 必须能被 UTF-8 工具链解析（旧版本是 UTF-16 LE + BOM，
+#     grep / git grep / Dependabot 等会静默失效，依赖漏洞告警形同关闭）
+#   - 不得把 config.json / *.session 这类凭据文件纳入版本库
+on:
+  push:
+  pull_request:
+
+concurrency:
+  group: hygiene-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  text-hygiene:
+    name: Text file hygiene
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: requirements.txt must be UTF-8 with a trailing newline (D-M2)
+        run: |
+          set -euo pipefail
+          file requirements.txt
+          if file requirements.txt | grep -qi 'UTF-16'; then
+            echo "::error::requirements.txt 仍是 UTF-16，grep / 依赖扫描工具无法解析（D-M2）"
+            exit 1
+          fi
+          # 能按 UTF-8 匹配到内容，说明文本工具链可用
+          grep -q 'PyMySQL' requirements.txt
+          grep -q 'aiohttp' requirements.txt
+          # 结尾必须有换行，否则后续工具追加内容会把两行粘在一起
+          if [ -n "$(tail -c 1 requirements.txt)" ]; then
+            echo "::error::requirements.txt 缺少结尾换行（D-M2）"
+            exit 1
+          fi
+
+      - name: No credentials or sessions tracked by git (D-H2 / D-M6)
+        run: |
+          set -euo pipefail
+          if git ls-files | grep -E '(^|/)(config\.json|.*\.session(-journal)?)$'; then
+            echo "::error::检测到被跟踪的 config.json 或 *.session，请立即从版本库移除并轮换密钥（D-H2）"
+            exit 1
+          fi
+          if git ls-files | grep -E '^log/'; then
+            echo "::error::检测到被跟踪的 log/ 运行时产物（D-M6）"
+            exit 1
+          fi

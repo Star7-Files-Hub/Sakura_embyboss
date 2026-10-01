@@ -11,6 +11,8 @@ from sqlalchemy import (
 )
 from cacheout import Cache
 
+from bot import LOGGER
+
 cache = Cache()
 
 
@@ -49,7 +51,9 @@ def sql_update_code(code, used: int, usedtime):
             session.commit()
             return True
         except Exception as e:
-            print(e)
+            # B-L1：补显式 rollback 与带上下文的日志
+            session.rollback()
+            LOGGER.error(f"更新注册码失败 code={code}: {e}")
             return False
 
 

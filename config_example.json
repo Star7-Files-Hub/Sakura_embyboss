@@ -1,18 +1,18 @@
 {
   "bot_name": "xxxbot",
-  "bot_token": "5701:AAEvAHzsg30",
+  "bot_token": "123456789:AAYourBotTokenPlaceholderxxxxxxxxx",
   "owner_api": 73711,
   "owner_hash": "",
-  "owner": xxxxxxx,
+  "owner": 1234567890,
   "group": [
-    -100xxxxxx
+    -1001234567890
   ],
   "main_group": "Aaaaa_su",
   "chanel": "su_yxfy",
   "bot_photo": "https://telegra.ph/file/3b6cd2a89b652e72e0d3b.png",
   "admins": [],
   "money": "花币",
-  "emby_api": "xxxxx",
+  "emby_api": "请填入你的 Emby API Key",
   "emby_url": "http://255.255.255.255:8096",
   "emby_line": "susuyyds.com",
   "emby_whitelist_line": null,
@@ -33,7 +33,9 @@
   ],
   "client_filter_enabled": false,
   "client_filter_mode": "blacklist",
-  "allowed_clients": [".*"],
+  "allowed_clients": [
+    ".*"
+  ],
   "client_filter_terminate_session": true,
   "client_filter_block_user": false,
   "line_filter_terminate_session": true,
@@ -43,6 +45,7 @@
   "db_user": "",
   "db_pwd": "",
   "db_name": "",
+  "db_port": 3306,
   "emby_block": [
     "nsfw"
   ],
@@ -51,16 +54,22 @@
   ],
   "open": {
     "stat": false,
+    "open_us": 30,
     "all_user": 1000,
     "register_worker_count": 5,
     "register_queue_limit": 100,
     "timing": 0,
     "tem": 0,
-    "allow_code": true,
     "checkin": true,
+    "checkin_lv": "d",
+    "checkin_reward": [
+      1,
+      10
+    ],
     "exchange": true,
     "whitelist": true,
     "invite": false,
+    "invite_lv": "b",
     "leave_ban": true,
     "uplays": true,
     "exchange_cost": 100,
@@ -75,7 +84,6 @@
   "tz_version": "v0",
   "tz_username": "",
   "tz_password": "",
-  "tz_note": "tz_version 可选值: v0 (Nezha V0 Token认证), v1 (Nezha V1 用户名密码认证), komari (Komari API Key认证)",
   "ranks": {
     "logo": "SAKURA",
     "backdrop": false
@@ -94,7 +102,11 @@
   "db_docker_name": "mysql",
   "db_backup_dir": "./db_backup",
   "db_backup_maxcount": 7,
-  "w_anti_chanel_ids": [],
+  "w_anti_channel_ids": [],
+  "kk_gift_days": 30,
+  "fuxx_pitao": true,
+  "activity_check_days": 21,
+  "freeze_days": 5,
   "proxy": {
     "scheme": "",
     "hostname": "",
@@ -111,7 +123,7 @@
     "price": 1
   },
   "auto_update": {
-    "status": true,
+    "status": false,
     "git_repo": "berry8838/Sakura_embyboss",
     "commit_sha": null
   },
@@ -121,11 +133,11 @@
   },
   "api": {
     "status": true,
-    "http_url": "0.0.0.0",
+    "http_url": "127.0.0.1",
     "http_port": 8838,
-    "allow_origins": [
-      "*"
-    ]
+    "allow_origins": [],
+    "internal_token": null,
+    "expose_docs": false
   },
   "concurrent_play_limit_enabled": false,
   "concurrent_play_limit": 2,

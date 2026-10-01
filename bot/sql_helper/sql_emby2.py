@@ -2,6 +2,8 @@ from bot.sql_helper import Base, Session
 from sqlalchemy import Column, String, DateTime, Integer
 from sqlalchemy import or_
 
+from bot import LOGGER
+
 
 class Emby2(Base):
     """
@@ -70,7 +72,10 @@ def sql_update_emby2(condition, **kwargs):
                 setattr(emby, k, v)
             session.commit()
             return True
-        except:
+        except Exception as e:
+            # B-L1：补显式 rollback 与带上下文的日志
+            session.rollback()
+            LOGGER.error(f"更新emby2记录失败: {e}")
             return False
 
 

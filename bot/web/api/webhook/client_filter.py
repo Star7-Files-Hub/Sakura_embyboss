@@ -243,12 +243,8 @@ async def handle_client_filter_webhook(request: Request):
                     "user_name": user_name,
                     "session_id": session_id,
                     "client_name": client_name,
-                    "user_details": {
-                        "tg": user_details.tg,
-                        "embyid": user_details.embyid,
-                        "name": user_details.name,
-                        "lv": user_details.lv,
-                    } if user_details else None,
+                    # 不回传用户身份明细（tg/embyid/lv），只返回处理结论，遵循最小必要原则
+                    "handled": bool(user_details),
                     "event": event,
                     "filter_mode": filter_mode,
                     "timestamp": datetime.now().isoformat(),
@@ -268,4 +264,4 @@ async def handle_client_filter_webhook(request: Request):
 
     except Exception as e:
         LOGGER.error(f"处理Client拦截webhook失败: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Webhook处理失败: {str(e)}")
+        raise HTTPException(status_code=500, detail="Webhook处理失败")

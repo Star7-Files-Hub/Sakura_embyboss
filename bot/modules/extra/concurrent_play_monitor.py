@@ -15,7 +15,7 @@ import asyncio
 from collections import defaultdict
 from datetime import datetime, timezone, timedelta
 
-from bot import bot, group, config, LOGGER
+from bot import bot, group, config, LOGGER, admins
 from bot.func_helper.emby import emby
 from bot.func_helper.msg_utils import sendMessage
 from bot.sql_helper.sql_emby import sql_get_emby, sql_update_emby, Emby
@@ -155,7 +155,24 @@ async def check_concurrent_play_limit():
             e = sql_get_by_embyid(emby_user_id)
         
         if e is None:
-            LOGGER.warning(f"未找到 emby_user_id={emby_user_id} 的数据库记录，跳过")
+            # 不在数据库中的 Emby 用户（例如直接建在 Emby 侧、或管理员账号）
+            # 无法告警/封禁，这里只记录以便运维发现。
+            # 注意：这类账号会永久绕过并发限制，建议为其在 bot 中建档或设为白名单。
+            session_user = ""
+            if sessions:
+                session_user = sessions[0].get("UserName") or ""
+            LOGGER.warning(
+                f"未找到 emby_user_id={emby_user_id} (UserName={session_user or '未知'}) "
+                f"的数据库记录，跳过并发限制检查（该账号不受限制）"
+            )
+            continue
+
+        # 白名单用户（lv='a'）与 bot 管理员豁免：
+        # docs_extra/Helper.md 承诺管理员/白名单账号不会被并发限制误伤。
+        if (e.lv or "").lower() == "a" or (e.tg is not None and e.tg in admins):
+            LOGGER.debug(
+                f"跳过白名单/管理员账号的并发播放检查: emby_user_id={emby_user_id}, tg={e.tg}, lv={e.lv}"
+            )
             continue
 
         user_name = e.name or "未知用户"
