@@ -65,6 +65,18 @@ async def user_in_group_filter(client, update):
                 return False
             else:
                 return False
+        except (ValueError, KeyError):
+            # pyrogram 在 resolve_peer 阶段（任何网络请求之前）就会对无法解析的 peer
+            # 抛 ValueError("Peer id invalid")，因此**不会**被上面的 `except BadRequest`
+            # 捕获。配置里只要有一个 bot 进不去的 group id（bot 未入群 / id 写错 /
+            # 群已解散），所有 /start 都会因这个未捕获异常而崩溃，用户侧表现为
+            # "发了消息毫无反应"（一号机真机实测复现）。
+            # 按"跳过该群"处理：一个失效的群 id 不该拖垮其他有效群。
+            LOGGER.error(
+                f"授权群 {i} 无法解析（bot 不在该群，或该 id 已失效），已跳过；"
+                f"请把 bot 拉入该群，或从 config.json 的 group 列表中移除该 id"
+            )
+            continue
         else:
             continue
     return False
@@ -98,6 +110,15 @@ async def user_in_group_on_filter(filt, client, update):
                 return False
             else:
                 return False
+        except (ValueError, KeyError):
+            # 同 user_in_group_filter：resolve_peer 阶段的 ValueError 不会被
+            # `except BadRequest` 捕获，必须单独处理，否则配置里一个失效的群 id
+            # 会让所有带该过滤器的命令崩溃。
+            LOGGER.error(
+                f"授权群 {i} 无法解析（bot 不在该群，或该 id 已失效），已跳过；"
+                f"请把 bot 拉入该群，或从 config.json 的 group 列表中移除该 id"
+            )
+            continue
     return False
 
 
