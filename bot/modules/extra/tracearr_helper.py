@@ -297,3 +297,79 @@ async def tracearr_terminate_fallback(emby_session_id: str, tracearr_session_id:
     if ok:
         return True, "通过 Tracearr 成功终止会话"
     return False, f"Tracearr 终止失败: {result}"
+
+
+def _norm_key(value) -> str:
+    """规范化用于模糊匹配的字符串：转小写并去掉所有空白。"""
+    return "".join(str(value or "").strip().lower().split())
+
+
+async def tracearr_terminate_by_identity(username: str, media_title: str = None,
+                                         reason: str = "Concurrent play limit exceeded"):
+    """
+    按"用户身份"在 Tracearr 中定位并终止活跃流 —— Emby 终止失败时的兜底。
+
+    为什么需要它：Tracearr 公开 API 的 Stream 对象（49 个字段）里**没有** Emby 的
+    sessionKey / UserId，只有 username、媒体标题（mediaTitle / showTitle）和设备信息，
+    因此无法用 Emby 会话 ID 直接对应，只能按这些字段做模糊匹配。
+
+    匹配策略（宁可失败也不误杀）：
+      1. 按 username 过滤（大小写/空白不敏感）；
+      2. 若给了 media_title，再要求 mediaTitle 或 showTitle 命中；
+      3. 结果必须唯一。0 条 -> 失败并说明；>1 条 -> 失败并列出候选，
+         交由调用方（或人工）判断，避免把同用户名其他人的流误杀。
+
+    :param username: Emby 的 UserName
+    :param media_title: 可选，Emby NowPlayingItem.Name（用于消歧）
+    :param reason: 终止原因
+    :return: (success, message)
+    """
+    if not tracearr.enabled:
+        return False, "Tracearr 未启用"
+
+    ok, streams = await tracearr.get_sessions()
+    if not ok:
+        return False, f"获取 Tracearr 会话列表失败: {streams}"
+    if not isinstance(streams, list):
+        return False, f"Tracearr 会话列表结构异常: {type(streams).__name__}"
+
+    uname = _norm_key(username)
+    if not uname:
+        return False, "缺少 username，无法在 Tracearr 中定位会话"
+
+    candidates = [
+        s for s in streams
+        if isinstance(s, dict) and _norm_key(s.get("username")) == uname
+    ]
+
+    if media_title:
+        want = _norm_key(media_title)
+        narrowed = [
+            s for s in candidates
+            if _norm_key(s.get("mediaTitle")) == want or _norm_key(s.get("showTitle")) == want
+        ]
+        # 标题没命中时保留原候选，但会在下面的分支里因不唯一而失败，不会误杀
+        if narrowed:
+            candidates = narrowed
+
+    if not candidates:
+        return False, f"Tracearr 中未找到用户 {username!r} 的活跃流"
+
+    if len(candidates) > 1:
+        detail = "; ".join(
+            f"{s.get('mediaTitle')!r}(id={s.get('id')})" for s in candidates[:5]
+        )
+        return False, (
+            f"Tracearr 中用户 {username!r} 有 {len(candidates)} 条活跃流，无法唯一确定，"
+            f"为避免误杀已放弃: {detail}"
+        )
+
+    stream = candidates[0]
+    ok, result = await tracearr.terminate_session(stream.get("id"), reason)
+    if ok:
+        LOGGER.info(
+            f"通过 Tracearr 兜底终止成功: user={username}, stream={stream.get('id')}, "
+            f"title={stream.get('mediaTitle')!r}"
+        )
+        return True, "通过 Tracearr 兜底终止成功"
+    return False, f"Tracearr 兜底终止失败: {result}"

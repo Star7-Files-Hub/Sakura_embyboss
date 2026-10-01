@@ -18,6 +18,7 @@ from datetime import datetime, timezone, timedelta
 from bot import bot, group, config, LOGGER, admins
 from bot.func_helper.emby import emby
 from bot.func_helper.msg_utils import sendMessage
+from bot.modules.extra.tracearr_helper import tracearr, tracearr_terminate_by_identity
 from bot.sql_helper.sql_emby import sql_get_emby, sql_update_emby, Emby
 
 
@@ -75,9 +76,26 @@ async def terminate_all_user_sessions(emby_user_id: str, sessions: list, reason:
         stop_result = await emby._request('POST', f'/emby/Sessions/{session_id}/Playing/Stop')
         if stop_result.success:
             success_count += 1
-        else:
-            fail_count += 1
-            LOGGER.warning(f"终止会话失败: session={session_id}, user={emby_user_id}, error={stop_result.error}")
+            continue
+
+        LOGGER.warning(f"终止会话失败: session={session_id}, user={emby_user_id}, error={stop_result.error}")
+
+        # Emby 直连终止失败 -> 用 Tracearr 兜底再试一次
+        # （这正是 docs_extra/Concurrent_Play_Limit.md 所说的"备选方案"，
+        #  此前只是客户端存在、从未被调用）
+        if tracearr.enabled:
+            username = session.get("UserName")
+            media_title = (session.get("NowPlayingItem") or {}).get("Name")
+            ok, msg = await tracearr_terminate_by_identity(
+                username=username, media_title=media_title, reason=reason
+            )
+            if ok:
+                LOGGER.info(f"Tracearr 兜底终止成功: session={session_id}, user={username!r}, {msg}")
+                success_count += 1
+                continue
+            LOGGER.warning(f"Tracearr 兜底终止未成功: session={session_id}, user={username!r}, {msg}")
+
+        fail_count += 1
 
     return success_count, fail_count
 

@@ -125,9 +125,29 @@ Emby ID: abc123def456
 
 ## 与 Tracearr 的配合
 
-如果同时启用了 Tracearr 对接，可以作为终止流的备选方案。但需要注意：
+启用 Tracearr 对接后，它会作为**终止流失败时的兜底**：当 Emby 直连的
+`POST /emby/Sessions/{id}/Playing/Stop` 失败时，本功能会再尝试通过 Tracearr 终止该流；
+兜底成功则计入成功数，失败则记一条 WARNING 并计入失败数。
 
 - **EmbyBoss 终止方式**：直接发送停止命令，不检查客户端能力
 - **Tracearr 终止方式**：会先检查 `SupportsRemoteControl`，客户端不支持时报错
 
-因此 EmbyBoss 的终止方式更"强力"，Tracearr 的方式更"安全"。
+因此 EmbyBoss 的终止方式更"强力"，Tracearr 的方式更"安全"，两者互补。
+
+### 兜底是怎么匹配到对应流的
+
+Tracearr 公开 API 的 Stream 对象（49 个字段）里**没有** Emby 的 `sessionKey` / `UserId`，
+只有 `username`、媒体标题（`mediaTitle` / `showTitle`）和设备信息，所以只能用这些字段做模糊匹配：
+
+1. 按 `username` 过滤（大小写、空白不敏感）；
+2. 若能从 Emby 会话取到 `NowPlayingItem.Name`，再要求 `mediaTitle` 或 `showTitle` 命中；
+3. **结果必须唯一**：
+   - 0 条 → 失败，日志说明"未找到"；
+   - 多条 → **放弃并列出候选**，宁可终止失败也不误杀同用户的其他流。
+
+> ⚠️ 因此当同一用户同时有多条流、且标题无法区分时，Tracearr 兜底会主动放弃。
+> 这是刻意的取舍：误杀别人正在看的流，比终止失败严重得多。
+
+> 📌 历史说明：本节的"备选方案"在早期版本中**只是文档承诺**——
+> `tracearr_terminate_fallback` 在仓库里没有任何调用方，实际从未生效。
+> 现已在 `concurrent_play_monitor.terminate_all_user_sessions()` 中真正接入。
