@@ -75,7 +75,10 @@ def _shutdown():
 
     原先依赖 aiohttp 会话的 __del__ 与事件循环关闭时的告警，退出时可能打印
     "Unclosed client session" 并让未完成的请求悬空。这里在事件循环仍然可用时
-    显式关闭 Emby 会话。
+    显式关闭 Emby 与 Tracearr 的会话。
+
+    注意 TracearrClient 会缓存 aiohttp.ClientSession（tracearr_helper.py:59），
+    只要调用过一次 Tracearr 就会持有连接；不关闭同样会泄漏。
     """
     from bot.func_helper.emby import emby
 
@@ -91,6 +94,11 @@ def _shutdown():
             await emby.close()
         except Exception as e:
             LOGGER.error(f"关闭 Emby 连接失败: {e}")
+        try:
+            from bot.modules.extra.tracearr_helper import tracearr
+            await tracearr.close()
+        except Exception as e:
+            LOGGER.error(f"关闭 Tracearr 连接失败: {e}")
 
     try:
         loop.run_until_complete(_close())

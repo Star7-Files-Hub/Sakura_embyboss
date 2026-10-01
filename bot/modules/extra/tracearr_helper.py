@@ -76,7 +76,13 @@ class TracearrClient:
         if not self.enabled:
             return False, "Tracearr 未启用或配置不完整"
 
-        url = f"{self.base_url}/api{endpoint}"
+        # API 前缀必须是 /api/v1（原来的 /api 会让所有 Tracearr 调用静默 404，
+        # 对接完全失效）。实机对照（Tracearr，2026-10）：
+        #   GET /api/sessions     -> 404 {"error":"Not Found"}
+        #   GET /api/v1/sessions  -> 401 UnauthorizedError（路由存在，仅缺鉴权）
+        # 五个端点（sessions / servers / users / violations / sessions/{id}/terminate）
+        # 在 /api/v1 下一一对应。
+        url = f"{self.base_url}/api/v1{endpoint}"
         session = await self._get_session()
 
         try:

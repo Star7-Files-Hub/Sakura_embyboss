@@ -151,8 +151,25 @@
 ### API Key 获取
 
 1. 登录 Tracearr Web 界面
-2. 进入 Settings → API Keys
-3. 生成新的 API Key
+2. 进入 **Settings → API**（"The public API key, its rate limit and what counts as watched"）
+3. 生成新的 API Key（公开 API Key，不是某个媒体服务器的 apiKey）
+
+> ⚠️ **API 前缀**：Tracearr 的公开 API 位于 `/api/v1/...`，本 bot 已按此对接。
+> 早期版本曾把前缀写成 `/api/...`，会导致所有请求返回 `404 {"error":"Not Found"}`，
+> 表现为"Tracearr 对接不生效"。若你修改过 `tracearr_helper.py`，请确认前缀是 `/api/v1`。
+> 鉴权方式为 `Authorization: Bearer <API Key>`。
+
+### 自检
+
+启用后可用下面命令确认对接是否通（把 Key 换成你的）：
+
+```bash
+curl -s -o /dev/null -w "%{http_code}\n" \
+  -H "Authorization: Bearer <你的API Key>" \
+  http://<tracearr地址>/api/v1/sessions
+```
+
+`200` = 正常；`401` = 路径对但 Key 无效；`404` = 前缀写错了。
 
 ### 终止会话对比
 
