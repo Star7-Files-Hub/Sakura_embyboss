@@ -41,11 +41,15 @@ async def _on_startup():
     scheduler.start()
 
     # 3) 恢复同时播放限制检测任务
+    # 这是该任务**唯一**的注册入口（面板开关回调只在运行时增删）。
+    # 必须带 replace_existing：开机路径可能被重复执行（如热重载/重入），
+    # 没有它会抛 ConflictingIdError 并被下面的 except 吞掉，导致任务静默缺失。
     try:
         if config.concurrent_play_limit_enabled:
             from bot.modules.extra.concurrent_play_monitor import check_concurrent_play_limit
             interval = config.concurrent_play_check_interval
-            scheduler.add_job(check_concurrent_play_limit, 'interval', seconds=interval, id='concurrent_play_check')
+            scheduler.add_job(check_concurrent_play_limit, 'interval', seconds=interval,
+                              id='concurrent_play_check', replace_existing=True)
             LOGGER.info(f"已恢复同时播放限制检测任务，间隔 {interval} 秒")
     except Exception as e:
         LOGGER.error(f"恢复同时播放限制检测任务失败: {e}")
@@ -75,10 +79,7 @@ def _shutdown():
 
     原先依赖 aiohttp 会话的 __del__ 与事件循环关闭时的告警，退出时可能打印
     "Unclosed client session" 并让未完成的请求悬空。这里在事件循环仍然可用时
-    显式关闭 Emby 与 Tracearr 的会话。
-
-    注意 TracearrClient 会缓存 aiohttp.ClientSession（tracearr_helper.py:59），
-    只要调用过一次 Tracearr 就会持有连接；不关闭同样会泄漏。
+    显式关闭 Emby 的会话。
     """
     from bot.func_helper.emby import emby
 
@@ -94,11 +95,6 @@ def _shutdown():
             await emby.close()
         except Exception as e:
             LOGGER.error(f"关闭 Emby 连接失败: {e}")
-        try:
-            from bot.modules.extra.tracearr_helper import tracearr
-            await tracearr.close()
-        except Exception as e:
-            LOGGER.error(f"关闭 Tracearr 连接失败: {e}")
 
     try:
         loop.run_until_complete(_close())

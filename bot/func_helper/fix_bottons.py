@@ -358,14 +358,18 @@ def config_preparation() -> InlineKeyboardMarkup:
     red_envelope_status = '✅' if red_envelope.status else '❎'
     allow_private = '✅' if red_envelope.allow_private else '❎'
     checkin_lv_text = {'a': '白名单', 'b': '普通用户', 'd': '所有人'}.get(_open.checkin_lv, '所有人')
-    cpl_enabled = '✅' if config.concurrent_play_limit_enabled else '❎'
-    tracearr_enabled = '✅' if config.tracearr_enabled else '❎'
+    # 并发限制按钮标签必须反映**调度器真实状态**（config_panel 的 _concurrent_toggle_label
+    # 会去查 concurrent_play_check 这个 job 是否存在），不能只读 config 标志位 ——
+    # 否则检测任务没注册时主面板仍显示"已开启"，与子面板自相矛盾。
+    # 函数内延迟导入：config_panel 在模块级反向导入了本模块，模块级导入会成环。
+    from bot.modules.panel.config_panel import _concurrent_toggle_label as _cpl_toggle_label
+    cpl_label = _cpl_toggle_label()
     keyboard = ikb(
         [[('📄 导出日志', 'log_out'), ('📌 设置探针', 'set_tz')],
          [('🎬 显/隐指定库', 'set_block'), (f'{fuxx_pt} 皮套人过滤功能', 'set_fuxx_pitao')],
          [('💠 普通用户线路', 'set_line'),('🌟 白名单线路', 'set_whitelist_line')],
          [('📡 客户端过滤', 'set_client_filter')],
-         [(f'{cpl_enabled} 同时播放限制', 'set_concurrent_play_limit'), (f'{tracearr_enabled} Tracearr对接', 'set_tracearr')],
+         [(cpl_label, 'set_concurrent_play_limit')],
          [(f'{leave_ban} 退群封禁', 'leave_ban'), (f'{uplays} 观影奖励结算', 'set_uplays')],
          [(f'{auto_up} 自动更新bot', 'set_update'), (f'{mp_set} Moviepilot点播', 'set_mp')],
          [(f'{red_envelope_status} 红包', 'set_red_envelope_status'), (f'{allow_private} 专属红包', 'set_red_envelope_allow_private')],

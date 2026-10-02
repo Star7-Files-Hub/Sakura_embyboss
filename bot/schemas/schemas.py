@@ -224,10 +224,6 @@ class Config(BaseModel):
     concurrent_play_limit: int = 2
     concurrent_play_warn_threshold: int = 3
     concurrent_play_check_interval: int = 60
-    # Tracearr 对接
-    tracearr_enabled: bool = False
-    tracearr_url: Optional[str] = None
-    tracearr_api_key: Optional[str] = None
     moviepilot: MP = Field(default_factory=MP)
     auto_update: AutoUpdate = Field(default_factory=AutoUpdate)
     red_envelope: RedEnvelope = Field(default_factory=RedEnvelope)

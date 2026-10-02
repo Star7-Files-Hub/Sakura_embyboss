@@ -48,12 +48,6 @@
 - 超过警告次数自动封禁账号
 - 所有限制参数均可通过控制面板调整
 
-### 🆕 Tracearr 对接
-
-- 通过 Tracearr API 获取会话信息
-- 通过 Tracearr API 终止会话（备选方案）
-- 获取用户播放数据和违规记录
-
 ---
 
 ## 🎯 命令帮助
@@ -191,62 +185,6 @@ Emby ID: abc123def456
 1. **白名单用户不受限**：建议将管理员账号设为白名单（`lv: a`），避免被误封
 2. **检测间隔不宜过短**：建议不低于 30 秒，避免对 Emby 服务器造成压力
 3. **与 Emby 原生限制的区别**：Emby 的 `SimultaneousStreamLimit` 策略会在播放开始时拒绝多余流，而本功能是在流已经开始后终止并警告
-
----
-
-## 🆕 Tracearr 对接 - 详细文档
-
-### 功能说明
-
-Tracearr 是一个多服务器监控平台，支持 Plex、Jellyfin 和 Emby。通过对接 Tracearr，EmbyBoss 可以获取会话信息、终止会话、查询违规记录。
-
-### 配置项
-
-在 `config.json` 中添加：
-
-```json
-{
-  "tracearr_enabled": false,
-  "tracearr_url": "https://tracearr.example.com",
-  "tracearr_api_key": "your-api-key-here"
-}
-```
-
-| 配置项 | 类型 | 默认值 | 说明 |
-|---|---|---|---|
-| `tracearr_enabled` | bool | `false` | 是否启用 |
-| `tracearr_url` | string | `null` | Tracearr 服务地址 |
-| `tracearr_api_key` | string | `null` | Tracearr API Key |
-
-### 控制面板路径
-
-```
-/config → 📡 Tracearr对接
-```
-
-### API Key 获取
-
-1. 登录 Tracearr Web 界面
-2. 进入 Settings → API Keys
-3. 生成新的 API Key
-4. 复制并保存到 config.json
-
-### 终止会话对比
-
-| 特性 | EmbyBoss 直接终止 | Tracearr 终止 |
-|---|---|---|
-| 检查客户端远程控制支持 | ❌ 不检查 | ✅ 检查 |
-| 客户端不支持时 | 仍发送命令 | 报错拒绝执行 |
-| 终止可靠性 | 较高 | 较低 |
-| 安全性 | 较低 | 较高 |
-
-### 常见问题
-
-**Q: Tracearr 报错 "Client does not support remote control"**
-
-A: 这是 Tracearr 的安全设计。Tracearr 在终止会话前会检查 `SupportsRemoteControl`，如果不支持则拒绝执行。解决方案：
-- 使用 EmbyBoss 的直接终止方式
-- 或忽略该错误
 
 ---
 

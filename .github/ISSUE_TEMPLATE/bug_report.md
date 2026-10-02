@@ -10,7 +10,7 @@ assignees: ''
 > ⚠️ **提交前请先读这一段（安全提示）**
 > 请勿在 issue 中粘贴任何敏感信息，包括但不限于：
 > - `config.json` 的全部或部分内容（`bot_token` / `emby_api` / `db_pwd` / `tz_password` /
->   `moviepilot.access_token` / `tracearr_api_key`）；
+>   `moviepilot.access_token`）；
 > - `*.session` / `*.session-journal`（Pyrogram 登录会话，泄露等同于 Telegram 账号被接管）；
 > - 数据库口令、服务器公网地址、Telegram / Emby 用户 ID 与真实昵称；
 > - 未打码的日志与截图（日志里可能带 token 前缀、API Key 与用户信息）。

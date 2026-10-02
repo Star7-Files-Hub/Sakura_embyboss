@@ -923,11 +923,43 @@ async def set_client_filter_mode(_, call):
 # 同时播放限制设置
 # ============================================================
 
+def _concurrent_job_running() -> bool:
+    """并发检查任务是否真的存在于调度器中。
+
+    不能只看 config.concurrent_play_limit_enabled —— 该开关只在面板点击时才
+    `add_job`，进程重启后 job 会丢失而配置仍是 True。只看配置会向管理员谎报
+    "已开启"，而策略实际根本不执行。这里一律以调度器的真实状态为准。
+    """
+    try:
+        from bot.func_helper.scheduler import scheduler
+        # SchedulerClient 未封装 get_job，直接查询底层 APScheduler 实例
+        return scheduler.SCHEDULER.get_job('concurrent_play_check') is not None
+    except Exception:
+        return False
+
+
+def _concurrent_status() -> str:
+    """并发限制的真实状态文案（供面板显示）。"""
+    if not config.concurrent_play_limit_enabled:
+        return '❌ 未开启'
+    if _concurrent_job_running():
+        return '✅ 已开启'
+    return '⚠️ 已开启但未生效（检测任务未注册，关闭再开启一次开关即可恢复）'
+
+
+def _concurrent_toggle_label() -> str:
+    """并发限制开关按钮上的标签。"""
+    if not config.concurrent_play_limit_enabled:
+        return '❎ 同时播放限制'
+    if _concurrent_job_running():
+        return '✅ 同时播放限制'
+    return '⚠️ 同时播放限制(未生效)'
+
+
 def concurrent_play_limit_panel() -> InlineKeyboardMarkup:
     """同时播放限制设置面板按钮"""
-    cpl_enabled = '✅' if config.concurrent_play_limit_enabled else '❎'
     keyboard = ikb([
-        [(f'{cpl_enabled} 同时播放限制', 'toggle_concurrent_play_limit')],
+        [(_concurrent_toggle_label(), 'toggle_concurrent_play_limit')],
         [(f'设置播放限制数({config.concurrent_play_limit}个)', 'set_concurrent_play_limit_count')],
         [(f'设置警告阈值({config.concurrent_play_warn_threshold}次)', 'set_concurrent_play_warn_threshold')],
         [(f'设置检测间隔({config.concurrent_play_check_interval}秒)', 'set_concurrent_play_check_interval')],
@@ -941,7 +973,7 @@ def concurrent_play_limit_panel() -> InlineKeyboardMarkup:
 async def set_concurrent_play_limit_panel(_, call):
     """进入同时播放限制设置子面板"""
     await callAnswer(call, '🎬 同时播放限制')
-    status = '✅ 已开启' if config.concurrent_play_limit_enabled else '❌ 未开启'
+    status = _concurrent_status()
     text = (
         f"🎬 **同时播放限制设置**\n\n"
         f"当前状态: **{status}**\n"
@@ -1099,88 +1131,3 @@ async def reset_concurrent_warn_counts_callback(_, call):
     else:
         await editMessage(call, "❌ 重置失败", buttons=back_config_p_ikb)
     await set_concurrent_play_limit_panel(_, call)
-
-
-# ============================================================
-# Tracearr 对接设置
-# ============================================================
-
-def tracearr_panel() -> InlineKeyboardMarkup:
-    """Tracearr 设置面板按钮"""
-    te_enabled = '✅' if config.tracearr_enabled else '❎'
-    keyboard = ikb([
-        [(f'{te_enabled} Tracearr对接', 'toggle_tracearr')],
-        [('📝 设置Tracearr参数', 'set_tracearr_params')],
-        [('🔙 返回', 'back_config')],
-    ])
-    return keyboard
-
-
-@bot.on_callback_query(filters.regex('^set_tracearr$') & admins_on_filter)
-async def set_tracearr_panel(_, call):
-    """进入 Tracearr 设置子面板"""
-    await callAnswer(call, '📡 Tracearr 对接')
-    status = '✅ 已开启' if config.tracearr_enabled else '❌ 未开启'
-    url_display = config.tracearr_url or '未设置'
-    key_display = f"{config.tracearr_api_key[:10]}..." if config.tracearr_api_key and len(config.tracearr_api_key) > 10 else (config.tracearr_api_key or '未设置')
-    text = (
-        f"📡 **Tracearr 对接设置**\n\n"
-        f"当前状态: **{status}**\n"
-        f"Tracearr URL: `{url_display}`\n"
-        f"API Key: `{key_display}`\n\n"
-        f"• Tracearr 可用于会话监控和流终止\n"
-        f"• 注意：Tracearr 要求客户端支持远程控制才能终止流\n"
-        f"• EmbyBoss 的终止方式不受此限制"
-    )
-    await editMessage(call, text, buttons=tracearr_panel())
-
-
-@bot.on_callback_query(filters.regex('^toggle_tracearr$') & admins_on_filter)
-async def toggle_tracearr(_, call):
-    """切换 Tracearr 对接开关"""
-    config.tracearr_enabled = not config.tracearr_enabled
-    if config.tracearr_enabled:
-        message = '📡 您已开启 Tracearr 对接'
-        log_message = f"【admin】：管理员 {call.from_user.first_name} 已开启 Tracearr 对接"
-    else:
-        message = '📡 您已关闭 Tracearr 对接'
-        log_message = f"【admin】：管理员 {call.from_user.first_name} 已关闭 Tracearr 对接"
-    await callAnswer(call, message, True)
-    save_config()
-    await set_tracearr_panel(_, call)
-    LOGGER.info(log_message)
-
-
-@bot.on_callback_query(filters.regex('^set_tracearr_params$') & admins_on_filter)
-async def set_tracearr_params(_, call):
-    """设置 Tracearr 参数"""
-    await callAnswer(call, '📝 设置Tracearr参数')
-    send = await editMessage(call,
-                             f"【设置 Tracearr 参数】\n\n"
-                             f"请依次输入 Tracearr 地址和 API Key，用换行隔开：\n"
-                             f"**https://tracearr.example.com\nyour-api-key**\n\n"
-                             f"取消点击 /cancel")
-    if send is False:
-        return
-    txt = await callListen(call, 120, back_config_p_ikb)
-    if txt is False:
-        return
-    if txt.text.strip() == '/cancel':
-        await txt.delete()
-        return await set_tracearr_panel(_, call)
-    await txt.delete()
-    try:
-        lines = txt.text.strip().split('\n')
-        url = lines[0].strip()
-        api_key = lines[1].strip() if len(lines) > 1 else ''
-        if not url:
-            raise ValueError("URL不能为空")
-    except (IndexError, ValueError) as e:
-        await editMessage(call, f"❌ 格式错误: {str(e)}", buttons=back_config_p_ikb)
-        return await set_tracearr_panel(_, call)
-    config.tracearr_url = url
-    config.tracearr_api_key = api_key
-    save_config()
-    await editMessage(call, f"✅ Tracearr 参数设置完成\nURL: `{url}`", buttons=back_config_p_ikb)
-    LOGGER.info(f"【admin】：{call.from_user.id} - 更新Tracearr参数")
-    await set_tracearr_panel(_, call)

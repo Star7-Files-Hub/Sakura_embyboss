@@ -129,10 +129,7 @@
   "concurrent_play_limit_enabled": false,
   "concurrent_play_limit": 2,
   "concurrent_play_warn_threshold": 3,
-  "concurrent_play_check_interval": 60,
-  "tracearr_enabled": false,
-  "tracearr_url": null,
-  "tracearr_api_key": null
+  "concurrent_play_check_interval": 60
 }
 ```
 
@@ -184,14 +181,6 @@
 | `concurrent_play_limit` | int | `2` | 每人允许的同时播放流数量 |
 | `concurrent_play_warn_threshold` | int | `3` | 警告次数上限，超过自动封禁 |
 | `concurrent_play_check_interval` | int | `60` | 检测间隔（秒） |
-
-### 🆕 Tracearr 对接
-
-| 字段 | 类型 | 默认值 | 说明 |
-|---|---|---|---|
-| `tracearr_enabled` | bool | `false` | 是否启用 Tracearr 对接 |
-| `tracearr_url` | string | `null` | Tracearr 服务地址 |
-| `tracearr_api_key` | string | `null` | Tracearr API Key |
 
 ### 🔒 API 服务（`api`）
 

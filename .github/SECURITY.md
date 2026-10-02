@@ -19,7 +19,7 @@
 | `bot_token` | Telegram bot 被完全接管（历史上它还被当作 Web API 的鉴权 token 使用） |
 | `emby_api` | 可对 Emby 服务器执行管理操作（封禁/删除用户等） |
 | `db_pwd` | 数据库读写权限 |
-| `tz_password` / `moviepilot.access_token` / `tracearr_api_key` | 第三方面板被接管 |
+| `tz_password` / `moviepilot.access_token` | 第三方面板被接管 |
 | `*.session`（Pyrogram 会话文件） | 等同于 Telegram 账号被接管 |
 
 因此：

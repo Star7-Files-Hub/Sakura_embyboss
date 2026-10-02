@@ -6,7 +6,6 @@
 - 当用户同时播放流超过限制时，警告并终止所有流
 - 在群内通报违规事件
 - 超过警告次数自动封禁账号
-- 可选对接 Tracearr 进行流终止
 
 Author: embyboss
 """
@@ -18,7 +17,6 @@ from datetime import datetime, timezone, timedelta
 from bot import bot, group, config, LOGGER, admins
 from bot.func_helper.emby import emby
 from bot.func_helper.msg_utils import sendMessage
-from bot.modules.extra.tracearr_helper import tracearr, tracearr_terminate_by_identity
 from bot.sql_helper.sql_emby import sql_get_emby, sql_update_emby, Emby
 
 
@@ -82,22 +80,6 @@ async def terminate_all_user_sessions(emby_user_id: str, sessions: list, reason:
             continue
 
         LOGGER.warning(f"终止会话失败: session={session_id}, user={emby_user_id}, error={stop_result.error}")
-
-        # Emby 直连终止失败 -> 用 Tracearr 兜底再试一次
-        # （这正是 docs_extra/Concurrent_Play_Limit.md 所说的"备选方案"，
-        #  此前只是客户端存在、从未被调用）
-        if tracearr.enabled:
-            username = session.get("UserName")
-            media_title = (session.get("NowPlayingItem") or {}).get("Name")
-            ok, msg = await tracearr_terminate_by_identity(
-                username=username, media_title=media_title, reason=reason
-            )
-            if ok:
-                LOGGER.info(f"Tracearr 兜底终止成功: session={session_id}, user={username!r}, {msg}")
-                success_count += 1
-                await _notify_session(session_id, f"🚫 {reason}，您的播放流已被终止。")
-                continue
-            LOGGER.warning(f"Tracearr 兜底终止未成功: session={session_id}, user={username!r}, {msg}")
 
         fail_count += 1
 
