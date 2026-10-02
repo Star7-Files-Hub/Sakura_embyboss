@@ -48,6 +48,15 @@ async def get_sessions_by_user():
     return sessions_by_user
 
 
+async def _notify_session(session_id: str, text: str):
+    """向 Emby 客户端推送弹窗通知。"""
+    await emby._request('POST', f'/emby/Sessions/{session_id}/Message', json={
+        "Text": text,
+        "Header": "播放限制警告",
+        "TimeoutMs": 10000,
+    })
+
+
 async def terminate_all_user_sessions(emby_user_id: str, sessions: list, reason: str = "同时播放超出限制"):
     """
     终止某用户的所有播放会话
@@ -64,18 +73,12 @@ async def terminate_all_user_sessions(emby_user_id: str, sessions: list, reason:
         if not session_id:
             continue
 
-        # 先发送消息通知用户
-        message_data = {
-            "Text": f"🚫 {reason}，您的所有播放流已被终止。",
-            "Header": "播放限制警告",
-            "TimeoutMs": 10000
-        }
-        await emby._request('POST', f'/emby/Sessions/{session_id}/Message', json=message_data)
-
         # 停止播放
         stop_result = await emby._request('POST', f'/emby/Sessions/{session_id}/Playing/Stop')
         if stop_result.success:
             success_count += 1
+            # 通知放在停止成功之后：避免"弹窗说已终止、实际没停掉"
+            await _notify_session(session_id, f"🚫 {reason}，您的播放流已被终止。")
             continue
 
         LOGGER.warning(f"终止会话失败: session={session_id}, user={emby_user_id}, error={stop_result.error}")
@@ -92,6 +95,7 @@ async def terminate_all_user_sessions(emby_user_id: str, sessions: list, reason:
             if ok:
                 LOGGER.info(f"Tracearr 兜底终止成功: session={session_id}, user={username!r}, {msg}")
                 success_count += 1
+                await _notify_session(session_id, f"🚫 {reason}，您的播放流已被终止。")
                 continue
             LOGGER.warning(f"Tracearr 兜底终止未成功: session={session_id}, user={username!r}, {msg}")
 
@@ -239,12 +243,23 @@ async def check_concurrent_play_limit():
         else:
             violation_msg += f"\n\n⚠️ 再犯 **{warn_threshold - new_warn_count}** 次将自动封禁账号！"
 
-        # 向用户发送警告
+        # 向用户发送警告（文案按实际终止结果生成，避免"没停掉却说已终止"）
         if tg_id:
+            if fail == 0:
+                enforce_line = "所有播放流已被强制终止。"
+            elif success == 0:
+                enforce_line = (
+                    "⚠️ 播放流终止失败，请**立即手动停止播放**，否则将直接封禁账号。"
+                )
+            else:
+                enforce_line = (
+                    f"⚠️ 已终止 {success} 个流，另有 {fail} 个流终止失败，"
+                    f"请**立即手动停止播放**，否则将直接封禁账号。"
+                )
             user_warn_msg = (
                 f"🚫 **播放限制警告**\n\n"
                 f"您的账号当前有 **{stream_count}** 个播放流，超出限制 **{limit}** 个。\n"
-                f"所有播放流已被强制终止。\n"
+                f"{enforce_line}\n"
                 f"警告次数: **{new_warn_count}** / **{warn_threshold}**\n\n"
                 f"⚠️ 超过 {warn_threshold} 次将自动封禁账号！"
             )
