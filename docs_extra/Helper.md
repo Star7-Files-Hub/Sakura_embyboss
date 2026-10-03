@@ -106,7 +106,9 @@
   "concurrent_play_limit_enabled": true,
   "concurrent_play_limit": 2,
   "concurrent_play_warn_threshold": 3,
-  "concurrent_play_check_interval": 60
+  "concurrent_play_check_interval": 60,
+  "concurrent_play_limit_whitelist_enabled": false,
+  "concurrent_play_limit_whitelist": 4
 }
 ```
 
@@ -119,12 +121,24 @@
 | `concurrent_play_limit` | 每人允许的同时播放流数量 | 2-3 |
 | `concurrent_play_warn_threshold` | 警告次数上限 | 3-5 |
 | `concurrent_play_check_interval` | 检测间隔（秒） | 30-120 |
+| `concurrent_play_limit_whitelist_enabled` | 白名单用户（`lv: a`）是否也纳入并发限制 | `false`（默认，即白名单豁免） |
+| `concurrent_play_limit_whitelist` | 白名单用户适用的上限，仅在上项为 `true` 时生效 | 4-6 |
+
+### 判定顺序
+
+1. **bot 管理员**：始终豁免，硬编码、没有开关可改（即使同时是白名单也豁免）
+2. **不在 bot 数据库里的 Emby 账号**（先按 Emby UserId 查库，查不到即属此类）：跳过并记一条 `WARNING`（无法告警/封禁，等于不受限）
+3. **白名单（`lv: a`）**：默认豁免；打开「白名单是否受限」后按 `concurrent_play_limit_whitelist` 判定
+4. **其他用户**：按 `concurrent_play_limit` 判定
+
+播放流数量**严格大于**该用户适用的上限才会被终止 + 警告（正好等于上限不算超限）。
 
 ### 注意事项
 
-1. 白名单用户（`lv: a`）与 Emby 管理员**已被自动豁免**，不会被终止播放或封禁（无需再手工配置）
-2. 检测间隔不宜过短，避免对 Emby 服务器造成压力
-3. 与 Emby 原生的 `SimultaneousStreamLimit` 不同，本功能是在流已经开始后终止并警告
+1. 白名单用户（`lv: a`）默认**自动豁免**，可在控制面板打开「白名单是否受限」改为按白名单上限判定；**bot 管理员始终豁免**，不受该开关影响
+2. 不在 bot 数据库里的 Emby 账号（例如直接建在 Emby 侧）会被跳过并记 warning，等于永久不受并发限制
+3. 检测间隔不宜过短，避免对 Emby 服务器造成压力
+4. 与 Emby 原生的 `SimultaneousStreamLimit` 不同，本功能是在流已经开始后终止并警告
 
 ---
 
@@ -140,6 +154,7 @@
 | 退群封禁 | 用户退群时直接封禁 |
 | 观影奖励结算 | 看片榜结算时给予积分奖励 |
 | 同时播放限制 | 🆕 检测并限制用户同时播放流数量 |
+| 播放速率限制 | 🆕 按 MB/s 限制普通用户 / 白名单用户的 Emby 播放码率（0 = 不限速） |
 
 ---
 

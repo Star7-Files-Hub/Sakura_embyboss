@@ -363,13 +363,16 @@ def config_preparation() -> InlineKeyboardMarkup:
     # 否则检测任务没注册时主面板仍显示"已开启"，与子面板自相矛盾。
     # 函数内延迟导入：config_panel 在模块级反向导入了本模块，模块级导入会成环。
     from bot.modules.panel.config_panel import _concurrent_toggle_label as _cpl_toggle_label
+    from bot.modules.panel.config_panel import _playback_rate_label as _prl_label
     cpl_label = _cpl_toggle_label()
+    prl_label = _prl_label()
     keyboard = ikb(
         [[('📄 导出日志', 'log_out'), ('📌 设置探针', 'set_tz')],
          [('🎬 显/隐指定库', 'set_block'), (f'{fuxx_pt} 皮套人过滤功能', 'set_fuxx_pitao')],
          [('💠 普通用户线路', 'set_line'),('🌟 白名单线路', 'set_whitelist_line')],
          [('📡 客户端过滤', 'set_client_filter')],
          [(cpl_label, 'set_concurrent_play_limit')],
+         [(f'{prl_label}', 'set_playback_rate_limit')],
          [(f'{leave_ban} 退群封禁', 'leave_ban'), (f'{uplays} 观影奖励结算', 'set_uplays')],
          [(f'{auto_up} 自动更新bot', 'set_update'), (f'{mp_set} Moviepilot点播', 'set_mp')],
          [(f'{red_envelope_status} 红包', 'set_red_envelope_status'), (f'{allow_private} 专属红包', 'set_red_envelope_allow_private')],

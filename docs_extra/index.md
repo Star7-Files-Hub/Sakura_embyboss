@@ -48,6 +48,13 @@
 - 超过警告次数自动封禁账号
 - 所有限制参数均可通过控制面板调整
 
+### 🆕 播放速率限制
+
+- 按 MB/s 限制普通用户与白名单用户的播放码率（写入 Emby 用户策略字段 `RemoteClientBitrateLimit`）
+- 两档独立配置，`0` = 不限速；bot 管理员与 Emby 管理员始终不限速
+- 新用户建档时自动生效，存量用户可在面板一键「⚡ 立即应用到全部用户」
+- 详细说明见 [播放速率限制](Playback_Rate_Limit.md)
+
 ---
 
 ## 🎯 命令帮助
@@ -130,7 +137,9 @@
   "concurrent_play_limit_enabled": false,
   "concurrent_play_limit": 2,
   "concurrent_play_warn_threshold": 3,
-  "concurrent_play_check_interval": 60
+  "concurrent_play_check_interval": 60,
+  "concurrent_play_limit_whitelist_enabled": false,
+  "concurrent_play_limit_whitelist": 4
 }
 ```
 
@@ -140,6 +149,8 @@
 | `concurrent_play_limit` | int | `2` | 每人允许的同时播放流数量 |
 | `concurrent_play_warn_threshold` | int | `3` | 警告次数上限，超过自动封禁 |
 | `concurrent_play_check_interval` | int | `60` | 检测间隔（秒） |
+| `concurrent_play_limit_whitelist_enabled` | bool | `false` | 白名单用户是否也纳入并发限制；`false` = 白名单豁免 |
+| `concurrent_play_limit_whitelist` | int | `4` | 白名单用户适用的上限，仅在上项为 `true` 时生效 |
 
 ### 控制面板路径
 
@@ -147,13 +158,15 @@
 /config → 🎬 同时播放限制
 ```
 
-可配置：开关、限制数、警告阈值、检测间隔、重置计数
+可配置：开关、限制数、白名单是否受限、白名单上限、警告阈值、检测间隔、重置计数
+
+判定顺序：**bot 管理员始终豁免**（硬编码，无开关）→ 白名单（默认豁免，打开开关后按白名单上限判定）→ 其他用户按普通上限判定；不在 bot 数据库里的 Emby 账号会被跳过并记 warning（等于不受限）。
 
 ### 工作流程
 
 1. **定时检测**：按设定间隔调用 `/emby/Sessions` 获取所有活跃会话
 2. **按用户分组**：将会话按 `UserId` 分组，统计每个用户的播放流数量
-3. **超限检测**：检查是否有用户的播放流超过限制
+3. **超限检测**：逐个账号确定其适用上限（管理员/白名单/不在库的账号先按上面的判定顺序处理），再判断播放流数是否严格大于该上限
 4. **终止流**：对超限用户，终止其所有播放流（发送消息 + `Playing/Stop`）
 5. **私信警告**：向违规用户发送私信
 6. **群内通报**：在主群发送违规通报
@@ -182,9 +195,10 @@ Emby ID: abc123def456
 
 ### 注意事项
 
-1. **白名单用户不受限**：建议将管理员账号设为白名单（`lv: a`），避免被误封
-2. **检测间隔不宜过短**：建议不低于 30 秒，避免对 Emby 服务器造成压力
-3. **与 Emby 原生限制的区别**：Emby 的 `SimultaneousStreamLimit` 策略会在播放开始时拒绝多余流，而本功能是在流已经开始后终止并警告
+1. **白名单默认豁免，但可以改成受限**：白名单用户（`lv: a`）默认不受并发限制；在控制面板打开「白名单是否受限」后按白名单上限（默认 4）判定。**bot 管理员是永久豁免的**，与这个开关无关
+2. **不在 bot 数据库里的 Emby 账号不受限**：这类账号会被跳过并记一条 `WARNING`，既不会被告警也不会被封禁
+3. **检测间隔不宜过短**：建议不低于 30 秒，避免对 Emby 服务器造成压力
+4. **与 Emby 原生限制的区别**：Emby 的 `SimultaneousStreamLimit` 策略会在播放开始时拒绝多余流，而本功能是在流已经开始后终止并警告
 
 ---
 

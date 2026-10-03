@@ -7,6 +7,14 @@
 - 在群内通报违规事件
 - 超过警告次数自动封禁账号
 
+判定规则（按优先级）：
+1. bot 管理员 —— **永久豁免**，没有开关可改（避免管理员把自己锁死）。
+   判定统一走 judge_admins()，即「站长 owner + config.admins」，与面板/命令权限一致
+2. 白名单 lv='a' —— 默认豁免；开启 concurrent_play_limit_whitelist_enabled 后
+   按 concurrent_play_limit_whitelist 这个独立上限判定
+3. 其他用户 —— 按 concurrent_play_limit 判定
+4. 不在数据库中的 Emby 账号 —— 跳过并记 warning（无法告警/封禁）
+
 Author: embyboss
 """
 
@@ -14,9 +22,10 @@ import asyncio
 from collections import defaultdict
 from datetime import datetime, timezone, timedelta
 
-from bot import bot, group, config, LOGGER, admins
+from bot import bot, group, config, LOGGER
 from bot.func_helper.emby import emby
 from bot.func_helper.msg_utils import sendMessage
+from bot.func_helper.utils import judge_admins
 from bot.sql_helper.sql_emby import sql_get_emby, sql_update_emby, Emby
 
 
@@ -137,8 +146,19 @@ async def check_concurrent_play_limit():
     if not config.concurrent_play_limit_enabled:
         return
 
-    limit = config.concurrent_play_limit
+    default_limit = config.concurrent_play_limit
+    whitelist_limit = config.concurrent_play_limit_whitelist
+    whitelist_enforced = config.concurrent_play_limit_whitelist_enabled
     warn_threshold = config.concurrent_play_warn_threshold
+
+    # 粗筛：用"可能生效的上限"里**最小**的那个过滤，保持零查库快路径。
+    #
+    # 这里必须是 min 而不是 max：任何应当被处罚的用户，其流数必然 > 自己适用的上限，
+    # 而适用上限 ≥ min(...)，所以流数 > min 一定成立 —— 不会漏判。
+    # 反过来若用 max，普通用户(上限2)播 3 个流时会 ≤ max(2,4)=4 而被直接跳过，
+    # 连查库都发生不了，永远不会被处罚（这是实测抓到的真实 bug）。
+    # 精确判定仍要等查到用户记录、知道是不是白名单之后再做。
+    prefilter = min(default_limit, whitelist_limit) if whitelist_enforced else default_limit
 
     try:
         sessions_by_user = await get_sessions_by_user()
@@ -148,7 +168,7 @@ async def check_concurrent_play_limit():
 
     for emby_user_id, sessions in sessions_by_user.items():
         stream_count = len(sessions)
-        if stream_count <= limit:
+        if stream_count <= prefilter:
             continue
 
         # 用户超出了播放限制
@@ -171,12 +191,30 @@ async def check_concurrent_play_limit():
             )
             continue
 
-        # 白名单用户（lv='a'）与 bot 管理员豁免：
-        # docs_extra/Helper.md 承诺管理员/白名单账号不会被并发限制误伤。
-        if (e.lv or "").lower() == "a" or (e.tg is not None and e.tg in admins):
+        # 1) bot 管理员**永久**豁免，没有开关可以改变这一点（避免管理员把自己锁死）。
+        #    这一条必须排在白名单判断之前：既是管理员又是白名单的账号也应当豁免。
+        #    统一走 judge_admins()：它把站长 owner 与 config.admins 都算作管理员，
+        #    与面板/命令的权限判定共用同一套定义（原先只查 config.admins，owner 不在
+        #    豁免范围内，与 filters.admins_on_filter 不一致）。
+        if e.tg is not None and judge_admins(e.tg):
             LOGGER.debug(
-                f"跳过白名单/管理员账号的并发播放检查: emby_user_id={emby_user_id}, tg={e.tg}, lv={e.lv}"
+                f"跳过 bot 管理员的并发播放检查: emby_user_id={emby_user_id}, tg={e.tg}"
             )
+            continue
+
+        is_whitelist = (e.lv or "").lower() == "a"
+
+        # 2) 白名单（lv='a'）默认豁免；开启 concurrent_play_limit_whitelist_enabled
+        #    后改为按 concurrent_play_limit_whitelist 这个独立上限判定。
+        if is_whitelist and not whitelist_enforced:
+            LOGGER.debug(
+                f"跳过白名单账号的并发播放检查: emby_user_id={emby_user_id}, tg={e.tg}"
+            )
+            continue
+
+        # 3) 确定该用户适用的上限后再做精确比较（粗筛可能放过了未超限的用户）
+        user_limit = whitelist_limit if is_whitelist else default_limit
+        if stream_count <= user_limit:
             continue
 
         user_name = e.name or "未知用户"
@@ -189,7 +227,7 @@ async def check_concurrent_play_limit():
             f"⚠️ **同时播放限制警告**\n\n"
             f"用户: `{user_name}` (TG: `{tg_id}`)\n"
             f"Emby ID: `{emby_user_id}`\n"
-            f"当前播放流: **{stream_count}** 个 (限制: **{limit}** 个)\n"
+            f"当前播放流: **{stream_count}** 个 (限制: **{user_limit}** 个)\n"
             f"检测时间: {now_str}\n"
             f"累计警告: **{current_warns + 1}** / **{warn_threshold}** 次\n"
         )
@@ -204,7 +242,7 @@ async def check_concurrent_play_limit():
         # 终止所有流
         success, fail = await terminate_all_user_sessions(
             emby_user_id, sessions,
-            reason=f"同时播放超出限制({stream_count}/{limit})"
+            reason=f"同时播放超出限制({stream_count}/{user_limit})"
         )
         violation_msg += f"\n✅ 已终止: {success} 个流"
         if fail > 0:
@@ -240,7 +278,7 @@ async def check_concurrent_play_limit():
                 )
             user_warn_msg = (
                 f"🚫 **播放限制警告**\n\n"
-                f"您的账号当前有 **{stream_count}** 个播放流，超出限制 **{limit}** 个。\n"
+                f"您的账号当前有 **{stream_count}** 个播放流，超出限制 **{user_limit}** 个。\n"
                 f"{enforce_line}\n"
                 f"警告次数: **{new_warn_count}** / **{warn_threshold}**\n\n"
                 f"⚠️ 超过 {warn_threshold} 次将自动封禁账号！"

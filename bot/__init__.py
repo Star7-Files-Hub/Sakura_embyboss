@@ -28,6 +28,17 @@ chanel = config.chanel
 bot_photo = config.bot_photo
 _open = config.open
 admins = config.admins
+# 启动期一致性自检：judge_admins()（bot/func_helper/utils.py）与 filters.admins_on_filter
+# 都按「静态绑定」读取本模块的 owner / admins，所以必须保证 admins 与 config.admins
+# 是**同一个 list 对象**。生产代码只做原地改（pro_rev.py 的 append/remove、
+# schemas.py 的 remove），一旦有人写成 `config.admins = [...]` 重新赋值，两者会**静默脱钩**
+# —— 改了管理员列表但权限判定不生效，且没有任何报错。这里启动时发现即告警；
+# 刻意不做断言，避免把 bot 直接弄得起不来。
+if admins is not config.admins:
+    LOGGER.warning(
+        "启动自检：bot.admins 与 config.admins 不是同一对象，"
+        "管理员权限判定（judge_admins / admins_on_filter）可能不生效"
+    )
 sakura_b = config.money
 ranks = config.ranks
 prefixes = ['/', '!', '.', '，', '。']

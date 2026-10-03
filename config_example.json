@@ -142,5 +142,13 @@
   "concurrent_play_limit_enabled": false,
   "concurrent_play_limit": 2,
   "concurrent_play_warn_threshold": 3,
-  "concurrent_play_check_interval": 60
+  "concurrent_play_check_interval": 60,
+  "concurrent_play_limit_whitelist_enabled": false,
+  "concurrent_play_limit_whitelist": 4,
+  "playback_rate_limit_enabled": false,
+  "playback_rate_limit": 8,
+  "playback_rate_limit_whitelist": 20,
+  "emby_server_type": "auto",
+  "emby_admin_user": "",
+  "emby_admin_password": ""
 }

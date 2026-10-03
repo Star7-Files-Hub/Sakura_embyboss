@@ -12,6 +12,13 @@ from pyrogram.types import InlineKeyboardMarkup
 
 from bot.func_helper.filters import admins_on_filter
 from bot.func_helper.fix_bottons import config_preparation, close_it_ikb, back_config_p_ikb, back_set_ikb, mp_config_ikb, client_filter_panel
+
+# go-emby 适配层：自研 Go Emby 服务端未实现 Emby 的 Policy 写接口，播放限速在它上面不生效。
+# 用防御性导入，保证适配层缺失时整个配置面板仍能正常打开。
+try:
+    from bot.func_helper import go_emby
+except Exception:  # pragma: no cover
+    go_emby = None
 from bot.func_helper.msg_utils import deleteMessage, editMessage, callAnswer, callListen, sendPhoto, sendFile
 from bot.func_helper.scheduler import scheduler
 from bot.scheduler.sync_mp_download import sync_download_tasks
@@ -961,6 +968,8 @@ def concurrent_play_limit_panel() -> InlineKeyboardMarkup:
     keyboard = ikb([
         [(_concurrent_toggle_label(), 'toggle_concurrent_play_limit')],
         [(f'设置播放限制数({config.concurrent_play_limit}个)', 'set_concurrent_play_limit_count')],
+        [(f"{'✅' if config.concurrent_play_limit_whitelist_enabled else '❎'} 白名单是否受限", 'toggle_concurrent_play_limit_whitelist')],
+        [(f'设置白名单上限({config.concurrent_play_limit_whitelist}个)', 'set_concurrent_play_limit_whitelist')],
         [(f'设置警告阈值({config.concurrent_play_warn_threshold}次)', 'set_concurrent_play_warn_threshold')],
         [(f'设置检测间隔({config.concurrent_play_check_interval}秒)', 'set_concurrent_play_check_interval')],
         [('🔄 重置所有警告计数', 'reset_concurrent_warn_counts')],
@@ -974,13 +983,19 @@ async def set_concurrent_play_limit_panel(_, call):
     """进入同时播放限制设置子面板"""
     await callAnswer(call, '🎬 同时播放限制')
     status = _concurrent_status()
+    whitelist_state = '是' if config.concurrent_play_limit_whitelist_enabled else '否'
     text = (
         f"🎬 **同时播放限制设置**\n\n"
         f"当前状态: **{status}**\n"
         f"播放限制: **{config.concurrent_play_limit}** 个流/人\n"
+        f"白名单受限: **{whitelist_state}**（上限 **{config.concurrent_play_limit_whitelist}** 个）\n"
         f"警告阈值: **{config.concurrent_play_warn_threshold}** 次\n"
         f"检测间隔: **{config.concurrent_play_check_interval}** 秒\n\n"
-        f"• 当用户同时播放流超过限制时，将终止所有流并警告\n"
+        f"**判定顺序：**\n"
+        f"• **bot 管理员始终不受并发限制**（永久豁免，没有开关可改）\n"
+        f"• 白名单用户(lv=a)：白名单受限为「否」时豁免；为「是」时按白名单上限 **{config.concurrent_play_limit_whitelist}** 个流判定\n"
+        f"• 其他用户：按播放限制 **{config.concurrent_play_limit}** 个流判定\n\n"
+        f"• 当用户同时播放流超过**其适用上限**时，将终止所有流并警告\n"
         f"• 超过警告阈值将自动封禁账号\n"
         f"• 违规事件将在群内通报"
     )
@@ -1043,6 +1058,55 @@ async def set_concurrent_play_limit_count(_, call):
     save_config()
     await editMessage(call, f"✅ 播放限制已设置为 **{count}** 个流", buttons=back_config_p_ikb)
     LOGGER.info(f"【admin】：{call.from_user.id} - 更新同时播放限制数为{count}")
+    await set_concurrent_play_limit_panel(_, call)
+
+
+@bot.on_callback_query(filters.regex('^toggle_concurrent_play_limit_whitelist$') & admins_on_filter)
+async def toggle_concurrent_play_limit_whitelist(_, call):
+    """切换「白名单用户是否也纳入并发限制」开关"""
+    config.concurrent_play_limit_whitelist_enabled = not config.concurrent_play_limit_whitelist_enabled
+    if config.concurrent_play_limit_whitelist_enabled:
+        message = '🎬 白名单用户已纳入 同时播放限制'
+        log_message = (f"【admin】：管理员 {call.from_user.first_name} 已开启 白名单并发限制"
+                       f"（上限 {config.concurrent_play_limit_whitelist} 个流）")
+    else:
+        message = '🎬 白名单用户已豁免 同时播放限制'
+        log_message = f"【admin】：管理员 {call.from_user.first_name} 已关闭 白名单并发限制"
+    await callAnswer(call, message, True)
+    save_config()
+    await set_concurrent_play_limit_panel(_, call)
+    LOGGER.info(log_message)
+
+
+@bot.on_callback_query(filters.regex('^set_concurrent_play_limit_whitelist$') & admins_on_filter)
+async def set_concurrent_play_limit_whitelist(_, call):
+    """设置白名单用户的并发上限"""
+    await callAnswer(call, '📌 设置白名单上限')
+    send = await editMessage(call,
+                             f"🎬【设置白名单上限】\n\n"
+                             f"当前上限: **{config.concurrent_play_limit_whitelist}** 个流\n"
+                             f"请输入一个数字（1-99，白名单用户允许的同时播放流数量）\n"
+                             f"取消点击 /cancel")
+    if send is False:
+        return
+    txt = await callListen(call, 120, back_config_p_ikb)
+    if txt is False:
+        return
+    if txt.text.strip() == '/cancel':
+        await txt.delete()
+        return await set_concurrent_play_limit_panel(_, call)
+    await txt.delete()
+    try:
+        count = int(txt.text)
+        if not 1 <= count <= 99:
+            raise ValueError
+    except ValueError:
+        await editMessage(call, "❌ 请输入 1-99 之间的数字", buttons=back_config_p_ikb)
+        return await set_concurrent_play_limit_panel(_, call)
+    config.concurrent_play_limit_whitelist = count
+    save_config()
+    await editMessage(call, f"✅ 白名单上限已设置为 **{count}** 个流", buttons=back_config_p_ikb)
+    LOGGER.info(f"【admin】：{call.from_user.id} - 更新白名单并发上限为{count}")
     await set_concurrent_play_limit_panel(_, call)
 
 
@@ -1131,3 +1195,238 @@ async def reset_concurrent_warn_counts_callback(_, call):
     else:
         await editMessage(call, "❌ 重置失败", buttons=back_config_p_ikb)
     await set_concurrent_play_limit_panel(_, call)
+
+
+# ============================================================
+# 播放速率限制设置
+# ============================================================
+
+# 换算规则与 bot/func_helper/emby.py 的 _rate_limit_bps() 保持一致：
+#   1 MB = 1024 × 1024 字节，故 bit/s = MB/s × 1024 × 1024 × 8
+_RATE_LIMIT_BYTES_PER_MB = 1024 * 1024
+
+
+def _rate_limit_bps_text(mb: int) -> str:
+    """把面板上的 MB/s 配置值换算成可读文案（0 表示不限速）。"""
+    try:
+        mb = int(mb)
+    except (TypeError, ValueError):
+        return f'配置非法（{mb!r}），按不限速处理'
+    if mb <= 0:
+        return '0 MB/s（不限速）'
+    return f'{mb} MB/s（{mb * _RATE_LIMIT_BYTES_PER_MB * 8} bit/s）'
+
+
+def _playback_rate_label() -> str:
+    """播放速率限制总开关按钮上的标签。
+
+    注意：这里只反映配置开关本身。本功能不像并发限制那样依赖调度器任务
+    （新用户建档时自动生效，存量用户靠「立即应用」），所以不存在
+    「已开启但未生效」这种中间态，无需三态判断。
+    """
+    return '✅ 播放速率限制' if config.playback_rate_limit_enabled else '❎ 播放速率限制'
+
+
+def playback_rate_limit_panel() -> InlineKeyboardMarkup:
+    """播放速率限制设置面板按钮"""
+    keyboard = ikb([
+        [(_playback_rate_label(), 'toggle_playback_rate_limit')],
+        [(f'设置普通用户码率({config.playback_rate_limit} MB/s)', 'set_playback_rate_limit_value')],
+        [(f'设置白名单码率({config.playback_rate_limit_whitelist} MB/s)', 'set_playback_rate_limit_whitelist')],
+        [('⚡ 立即应用到全部用户', 'apply_playback_rate_limit_all')],
+        [('🔙 返回', 'back_config')],
+    ])
+    return keyboard
+
+
+async def _emby_server_type_text() -> str:
+    """探测并描述当前 Emby 服务端类型，用于在面板上提示功能可用性。"""
+    if go_emby is None:
+        return '未知（go-emby 适配层未加载）'
+    try:
+        server_type = await go_emby.detect_server_type()
+    except Exception as e:
+        return f'探测失败（{type(e).__name__}）'
+    if server_type == go_emby.SERVER_GO_EMBY:
+        return 'go-emby（自研 Go Emby 服务端）'
+    return '官方 Emby'
+
+
+async def _playback_rate_panel_text() -> str:
+    """播放速率限制子面板的正文（抽出来是为了让「立即应用」的结果能追加在后面）。"""
+    status = '✅ 已开启' if config.playback_rate_limit_enabled else '❌ 未开启'
+    server_text = await _emby_server_type_text()
+
+    # go-emby 把 Policy 写接口做成了空转，限速字段在该服务端恒为 0，必须明确告知不可用，
+    # 否则用户会以为点了「立即应用」就生效了。
+    unsupported = ''
+    if go_emby is not None:
+        try:
+            if await go_emby.detect_server_type() == go_emby.SERVER_GO_EMBY:
+                unsupported = (
+                    "\n⚠️ **当前服务端不支持播放速率限制**\n"
+                    "go-emby 未实现 Emby 的 Policy 写接口"
+                    "（`POST /emby/Users/{id}/Policy` 返回 204 但会丢弃请求体），"
+                    "`RemoteClientBitrateLimit` 在该服务端恒为 0，"
+                    "因此下面的设置与「⚡ 立即应用」**不会生效**。\n"
+                    "（封禁与并发上限已改走该服务端的 `/admin/users`，仍然有效）\n"
+                )
+        except Exception:
+            pass
+
+    return (
+        f"🎬 **播放速率限制设置**\n\n"
+        f"当前状态: **{status}**\n"
+        f"服务端类型: **{server_text}**\n"
+        f"普通用户: **{_rate_limit_bps_text(config.playback_rate_limit)}**\n"
+        f"白名单用户: **{_rate_limit_bps_text(config.playback_rate_limit_whitelist)}**\n\n"
+        f"**换算规则：**1 MB = 1024 × 1024 字节，"
+        f"码率(bit/s) = MB/s × 8 × 1024 × 1024\n"
+        f"**码率填 0 表示不限速。**\n\n"
+        f"**豁免说明：**\n"
+        f"• **bot 管理员与 Emby 管理员始终不限速**（不受本设置影响）\n"
+        f"{unsupported}\n"
+        f"**生效时机：**\n"
+        f"• 修改码率后需点「⚡ 立即应用到全部用户」，才对**存量用户**生效\n"
+        f"• **新用户**建档时自动按当时配置生效\n"
+        f"• 关闭开关后再点「立即应用」，可解除存量用户的限速"
+    )
+
+
+@bot.on_callback_query(filters.regex('^set_playback_rate_limit$') & admins_on_filter)
+async def set_playback_rate_limit_panel(_, call):
+    """进入播放速率限制设置子面板"""
+    await callAnswer(call, '🎬 播放速率限制')
+    await editMessage(call, await _playback_rate_panel_text(), buttons=playback_rate_limit_panel())
+
+
+@bot.on_callback_query(filters.regex('^toggle_playback_rate_limit$') & admins_on_filter)
+async def toggle_playback_rate_limit(_, call):
+    """切换播放速率限制总开关"""
+    config.playback_rate_limit_enabled = not config.playback_rate_limit_enabled
+    if config.playback_rate_limit_enabled:
+        message = '🎬 您已开启 播放速率限制功能'
+        log_message = f"【admin】：管理员 {call.from_user.first_name} 已开启 播放速率限制功能"
+    else:
+        message = '🎬 您已关闭 播放速率限制功能'
+        log_message = f"【admin】：管理员 {call.from_user.first_name} 已关闭 播放速率限制功能"
+    await callAnswer(call, message, True)
+    save_config()
+    await set_playback_rate_limit_panel(_, call)
+    LOGGER.info(log_message)
+
+
+@bot.on_callback_query(filters.regex('^set_playback_rate_limit_value$') & admins_on_filter)
+async def set_playback_rate_limit_value(_, call):
+    """设置普通用户的播放码率上限（MB/s）"""
+    await callAnswer(call, '📌 设置普通用户码率')
+    send = await editMessage(call,
+                             f"🎬【设置普通用户码率】\n\n"
+                             f"当前码率: **{_rate_limit_bps_text(config.playback_rate_limit)}**\n"
+                             f"请输入一个数字（0-999，单位 MB/s，**填 0 表示不限速**）\n"
+                             f"取消点击 /cancel")
+    if send is False:
+        return
+    txt = await callListen(call, 120, back_config_p_ikb)
+    if txt is False:
+        return
+    if txt.text.strip() == '/cancel':
+        await txt.delete()
+        return await set_playback_rate_limit_panel(_, call)
+    await txt.delete()
+    try:
+        mb = int(txt.text)
+        # 下界是 0（不限速），不是并发限制那个 1 —— 语义不同，别照抄
+        if not 0 <= mb <= 999:
+            raise ValueError
+    except ValueError:
+        await editMessage(call, "❌ 请输入 0-999 之间的数字（0 表示不限速）", buttons=back_config_p_ikb)
+        return await set_playback_rate_limit_panel(_, call)
+    config.playback_rate_limit = mb
+    save_config()
+    await editMessage(call, f"✅ 普通用户码率已设置为 **{_rate_limit_bps_text(mb)}**\n"
+                            f"⚠️ 对存量用户需点「⚡ 立即应用到全部用户」才会生效",
+                      buttons=back_config_p_ikb)
+    LOGGER.info(f"【admin】：{call.from_user.id} - 更新普通用户播放码率为{mb} MB/s")
+    await set_playback_rate_limit_panel(_, call)
+
+
+@bot.on_callback_query(filters.regex('^set_playback_rate_limit_whitelist$') & admins_on_filter)
+async def set_playback_rate_limit_whitelist(_, call):
+    """设置白名单用户的播放码率上限（MB/s）"""
+    await callAnswer(call, '📌 设置白名单码率')
+    send = await editMessage(call,
+                             f"🎬【设置白名单码率】\n\n"
+                             f"当前码率: **{_rate_limit_bps_text(config.playback_rate_limit_whitelist)}**\n"
+                             f"请输入一个数字（0-999，单位 MB/s，**填 0 表示不限速**）\n"
+                             f"取消点击 /cancel")
+    if send is False:
+        return
+    txt = await callListen(call, 120, back_config_p_ikb)
+    if txt is False:
+        return
+    if txt.text.strip() == '/cancel':
+        await txt.delete()
+        return await set_playback_rate_limit_panel(_, call)
+    await txt.delete()
+    try:
+        mb = int(txt.text)
+        if not 0 <= mb <= 999:
+            raise ValueError
+    except ValueError:
+        await editMessage(call, "❌ 请输入 0-999 之间的数字（0 表示不限速）", buttons=back_config_p_ikb)
+        return await set_playback_rate_limit_panel(_, call)
+    config.playback_rate_limit_whitelist = mb
+    save_config()
+    await editMessage(call, f"✅ 白名单码率已设置为 **{_rate_limit_bps_text(mb)}**\n"
+                            f"⚠️ 对存量用户需点「⚡ 立即应用到全部用户」才会生效",
+                      buttons=back_config_p_ikb)
+    LOGGER.info(f"【admin】：{call.from_user.id} - 更新白名单播放码率为{mb} MB/s")
+    await set_playback_rate_limit_panel(_, call)
+
+
+@bot.on_callback_query(filters.regex('^apply_playback_rate_limit_all$') & admins_on_filter)
+async def apply_playback_rate_limit_all(_, call):
+    """立即把当前播放速率限制应用到全部 Emby 用户"""
+    await callAnswer(call, '⚡ 正在应用，请稍候…（会向 Emby 发送多次请求）', True)
+    # go-emby 未实现 Policy 写接口，限速字段恒为 0：直接明确拒绝，不要发一堆注定无效的请求
+    if go_emby is not None:
+        try:
+            if await go_emby.detect_server_type() == go_emby.SERVER_GO_EMBY:
+                await editMessage(
+                    call,
+                    "❌ **当前服务端不支持播放速率限制**\n\n"
+                    "go-emby（自研 Go Emby 服务端）未实现 Emby 的 Policy 写接口，"
+                    "`RemoteClientBitrateLimit` 在该服务端恒为 0，无法设置。\n\n"
+                    "封禁与并发上限已改走该服务端的 `/admin/users`，仍然有效。",
+                    buttons=playback_rate_limit_panel())
+                return
+        except Exception:
+            pass
+    # 函数内局部导入：本文件模块级没有引入 emby，与其它跨模块调用的写法保持一致
+    from bot.func_helper.emby import emby
+    try:
+        success, failed = await emby.emby_apply_rate_limit_to_all()
+    except Exception as e:
+        LOGGER.error(f"【播放速率限制】应用到全部用户时异常：{e}")
+        await editMessage(call, f"❌ 应用失败：{e}\n请查看日志确认。", buttons=back_config_p_ikb)
+        return
+    # 如实反馈：绝不把 (0, 0) 说成成功 —— emby_apply_rate_limit_to_all() 在
+    # 「获取 Emby 用户列表失败」时也返回 (0, 0)，与「全部已是最新值」无法区分。
+    if failed > 0:
+        result = (f"⚠️ **应用完成（部分失败）**\n"
+                  f"• 成功: **{success}** 个\n"
+                  f"• 失败: **{failed}** 个 —— 这些用户未生效，请查看日志核对")
+    elif success > 0:
+        result = (f"✅ **已应用到全部用户**\n"
+                  f"• 成功: **{success}** 个\n"
+                  f"• 失败: **0** 个")
+    else:
+        result = ("ℹ️ **本次未改动任何用户**（成功 0，失败 0）\n"
+                  "• 可能所有用户已是最新码率（幂等跳过）\n"
+                  "• 也可能是获取 Emby 用户列表失败，请查看日志确认")
+    LOGGER.info(f"【admin】：{call.from_user.id} - 立即应用播放速率限制，"
+                f"成功{success}个，失败{failed}个")
+    # 把结果追加在面板正文后面，而不是先提示再被面板刷新覆盖掉
+    await editMessage(call, await _playback_rate_panel_text() + f"\n\n{result}",
+                      buttons=playback_rate_limit_panel())

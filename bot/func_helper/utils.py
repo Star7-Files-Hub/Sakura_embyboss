@@ -17,10 +17,14 @@ def judge_admins(uid):
     # 注意：不要在此处加入 `uid not in group`。group 是授权群/频道的 chat id 列表（值为负），
     # 而 uid 是 tg 用户 id（值为正），二者取值域不相交，该子句对任何真实用户恒为 True
     # （A-C2 已证伪为死代码）。群成员判定请统一走 filters.user_in_group_on_filter。
-    if uid != owner and uid not in admins:
+    #
+    # 这里刻意沿用 bot 模块的 owner/admins 绑定（与 filters.admins_on_filter 同一套约定），
+    # 而不改读 config.owner/config.admins：现网两者是同一个 list 对象
+    # （bot.admins is config.admins），改 admins 走原地 append/remove（pro_rev.py），
+    # 故结果一致；若改读 config.*，一旦有人重新赋值 config.admins 就会与 filters 判定脱钩。
+    if uid is None:
         return False
-    else:
-        return True
+    return uid == owner or uid in (admins or [])
 
 
 # @cache.memoize(ttl=60)
