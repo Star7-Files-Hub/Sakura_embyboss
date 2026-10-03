@@ -85,10 +85,34 @@ class GoEmbyAdmin:
 
     # ------------------------------------------------------------------ 工具
     def _sanitize(self, text: Any) -> str:
-        """把任意文本里的管理员密码抹掉，确保可以安全落日志。"""
+        """把任意文本里的管理员密码抹掉，确保可以安全落日志。
+
+        ⚠️ 必须替换密码的**多种转义形态**，不能只替换原文。
+        密码里若含反斜杠、换行、制表符等字符，一旦被 `repr()` 或 JSON 序列化
+        就会变成另一种写法（`\\\\` / `\\n` / `\\t`），此时只 `replace(原文)` 匹配不到，
+        密码前缀仍会漏进日志。触发场景实测存在：`Message`/`error` 是 list 或 dict
+        时 `str()` 走的就是 repr，密码含一个反斜杠就会泄漏出前 3 个字符。
+        因此这里同时替换：原文、JSON 转义形态、Python repr 转义形态。
+        """
         s = str(text)
-        if self._admin_password:
-            s = s.replace(self._admin_password, '***')
+        pw = self._admin_password
+        if not pw:
+            return s
+
+        variants = {pw}
+        try:
+            variants.add(json.dumps(pw)[1:-1])   # JSON 转义形态
+        except Exception:
+            pass
+        try:
+            variants.add(repr(pw)[1:-1])         # Python repr 转义形态
+        except Exception:
+            pass
+        variants.discard('')
+
+        # 长的先替换：转义形态通常更长，先替换可避免短形态抢先吃掉一部分字符
+        for variant in sorted(variants, key=len, reverse=True):
+            s = s.replace(variant, '***')
         return s
 
     def _error_message(self, text: Optional[str]) -> str:
