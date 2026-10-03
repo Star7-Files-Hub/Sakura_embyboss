@@ -24,6 +24,8 @@ from datetime import datetime, timezone, timedelta
 
 from bot import bot, group, config, LOGGER
 from bot.func_helper.emby import emby
+# 模块本身也要引用：is_emby_admin() 是模块级函数（emby 单例上没有它）
+from bot.func_helper import emby as emby_mod
 from bot.func_helper.msg_utils import sendMessage
 from bot.func_helper.utils import judge_admins
 from bot.sql_helper.sql_emby import sql_get_emby, sql_update_emby, Emby
@@ -199,6 +201,22 @@ async def check_concurrent_play_limit():
         if e.tg is not None and judge_admins(e.tg):
             LOGGER.debug(
                 f"跳过 bot 管理员的并发播放检查: emby_user_id={emby_user_id}, tg={e.tg}"
+            )
+            continue
+
+        # 1b) **Emby 侧**管理员同样永久豁免（用户明确要求）。
+        #     不能只依赖上面那条「查不到 bot 记录就跳过」——那只覆盖了没建档的管理员。
+        #     若管理员同时在 bot 里建了档（如 lv='b'），超限就会走到下面的封禁；
+        #     而封禁在官方 Emby 与 go-emby 上**都会把 IsAdministrator 写成 false**
+        #     （create_policy(admin=False) / PUT /admin/users 的 Admin=false），
+        #     等于把管理员**永久降权**。go-emby 适配后该动作从「空转」变成「真的生效」。
+        #     取不到身份（None）时**同样豁免**：宁可少限制一个用户一个周期，也不能
+        #     误伤管理员；异常会打 WARNING，便于运维发现。
+        emby_admin = await emby_mod.is_emby_admin(emby_user_id)
+        if emby_admin is None or emby_admin:
+            LOGGER.warning(
+                f"跳过 Emby 管理员的并发播放检查: emby_user_id={emby_user_id}, tg={e.tg}, "
+                f"判定={'未知(按豁免处理)' if emby_admin is None else '是管理员'}"
             )
             continue
 

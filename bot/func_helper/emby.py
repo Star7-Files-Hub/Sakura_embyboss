@@ -112,6 +112,44 @@ async def _go_emby_current_state(admin_client, emby_id: str):
             None if can_play is None else bool(can_play))
 
 
+async def is_emby_admin(emby_id: str):
+    """
+    判断该用户是否是 **Emby 侧** 管理员（`Policy.IsAdministrator`）。
+
+    为什么需要它：用户明确要求「Emby 管理员永久豁免」。并发监控原本只靠
+    `judge_admins()`（站长 owner + `config.admins`）判豁免，而 Emby 侧的
+    `IsAdministrator` 不在这个定义里。1 号机的 `admin` 账号恰好**没有在 bot
+    里建档**，所以靠「查不到记录就跳过」侥幸豁免 —— 一旦某个 Emby 管理员
+    同时在 bot 里建了档（例如 `lv='b'`），超限时就会走到封禁，而封禁在官方
+    Emby 与 go-emby 上**都会把 `IsAdministrator` 写成 false**
+    （`create_policy(admin=False)` / `PUT /admin/users` 的 `Admin=false`），
+    等于把管理员**永久降权**。go-emby 适配之后这个动作从「空转」变成了
+    「真的生效」，所以必须显式豁免，不能再依赖巧合。
+
+    :return: True=是 Emby 管理员；False=不是；None=取不到（未知）
+    """
+    try:
+        if await _is_go_emby_server():
+            admin_client = _go_emby_admin_client()
+            if admin_client is None:
+                return None
+            state = await _go_emby_current_state(admin_client, emby_id)
+            return None if state is None else state[0]
+
+        result = await emby._request('GET', f'/emby/Users/{emby_id}')
+        if not result.success or not isinstance(result.data, dict):
+            return None
+        policy = result.data.get('Policy')
+        if not isinstance(policy, dict) or policy.get('IsAdministrator') is None:
+            return None
+        return bool(policy['IsAdministrator'])
+    except Exception as e:
+        LOGGER.warning(
+            f"判断 Emby 管理员身份失败 emby_id={emby_id}: {type(e).__name__}: {e}"
+        )
+        return None
+
+
 def create_policy(admin=False, disable=False, limit: int = 2, block: list = None,
                   whitelist: bool = False, tg=None):
     """

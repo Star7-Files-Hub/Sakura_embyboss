@@ -91,18 +91,26 @@ class GoEmbyAdmin:
             s = s.replace(self._admin_password, '***')
         return s
 
-    @staticmethod
-    def _error_message(text: Optional[str]) -> str:
-        """从服务端错误体里取出可读消息（形如 {"Message":..,"error":..}）。"""
+    def _error_message(self, text: Optional[str]) -> str:
+        """从服务端错误体里取出可读消息（形如 {"Message":..,"error":..}）。
+
+        ⚠️ 顺序必须是 **先脱敏、再截断**，不能反过来。
+        `_sanitize()` 靠「完整密码字面量」做替换；若先把文本截到 200 字符，而密码
+        恰好跨过第 200 个字符，完整密码就已经不在串里了，`replace` 匹配不到，
+        会把密码前缀原样漏进日志。实测可复现：密码起始偏移 190 时会泄漏出前
+        10 个字符。服务端把 Go panic 堆栈回显进错误体时很容易超过 200 字符。
+        """
         if not text:
             return ''
         try:
             data = json.loads(text)
         except Exception:
-            return str(text)[:200]
+            return self._sanitize(text)[:200]
         if isinstance(data, dict):
-            return str(data.get('Message') or data.get('error') or '')[:200]
-        return str(data)[:200]
+            msg = data.get('Message') or data.get('error') or ''
+        else:
+            msg = data
+        return self._sanitize(msg)[:200]
 
     def _headers(self) -> Dict[str, str]:
         headers = {'Content-Type': 'application/json'}
