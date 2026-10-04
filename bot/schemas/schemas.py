@@ -228,12 +228,6 @@ class Config(BaseModel):
     concurrent_play_limit_whitelist_enabled: bool = False
     # 白名单用户适用的并发上限，仅在上项为 True 时生效
     concurrent_play_limit_whitelist: int = 4
-    # 播放速率限制（按用户，单位 MB/s，0 表示不限速）
-    playback_rate_limit_enabled: bool = False
-    # 普通用户适用的码率上限（MB/s）
-    playback_rate_limit: int = 8
-    # 白名单用户(lv='a')适用的码率上限（MB/s）
-    playback_rate_limit_whitelist: int = 20
     moviepilot: MP = Field(default_factory=MP)
     auto_update: AutoUpdate = Field(default_factory=AutoUpdate)
     red_envelope: RedEnvelope = Field(default_factory=RedEnvelope)

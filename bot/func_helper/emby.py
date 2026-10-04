@@ -15,50 +15,7 @@ from contextlib import asynccontextmanager
 
 from bot import emby_url, emby_api, emby_block, extra_emby_libs, LOGGER, config
 from bot.sql_helper.sql_emby import sql_update_emby, sql_get_emby, Emby
-from bot.func_helper.utils import pwd_create, convert_runtime, cache, Singleton, judge_admins
-
-
-def _is_whitelist_user(emby_record) -> bool:
-    """
-    判断 bot 用户记录是否属于白名单（lv='a'）。记录为 None 时按普通用户处理。
-    """
-    return bool(emby_record is not None and (getattr(emby_record, 'lv', '') or '').lower() == 'a')
-
-
-def _rate_limit_bps(whitelist: bool = False, admin: bool = False, tg=None) -> int:
-    """
-    计算 Emby 策略里的 RemoteClientBitrateLimit（单位 bit/s，0 = 不限速）。
-
-    换算：1 MB 按 1024×1024 字节计算，故 bit/s = MB/s × 1024 × 1024 × 8。
-    例：8 MB/s -> 67108864。
-
-    豁免规则（沿用「管理员永久豁免」的偏好）：
-    - Emby 管理员（admin=True）不限速；
-    - bot 管理员（站长 owner 与 config.admins）不限速：统一走 judge_admins()，
-      与面板/命令的权限判定共用同一套定义，避免两处判定分叉；
-    - 功能未开启、或配置值 <= 0 / 非法时，一律返回 0（不限速）。
-
-    :param whitelist: 是否按白名单码率取值
-    :param admin: 该用户在 Emby 侧是否管理员
-    :param tg: 该用户的 Telegram id（用于判断 bot 管理员），未知则传 None
-    :return: bit/s，0 表示不限速
-    """
-    if admin:
-        return 0
-    if tg is not None and judge_admins(tg):
-        return 0
-    if not config.playback_rate_limit_enabled:
-        return 0
-
-    mb = config.playback_rate_limit_whitelist if whitelist else config.playback_rate_limit
-    try:
-        mb = int(mb)
-    except (TypeError, ValueError):
-        LOGGER.warning(f"播放速率限制配置非法（{mb!r}），按不限速处理")
-        return 0
-    if mb <= 0:
-        return 0
-    return mb * 1024 * 1024 * 8
+from bot.func_helper.utils import pwd_create, convert_runtime, cache, Singleton
 
 
 async def is_emby_admin(emby_id: str):
@@ -90,16 +47,13 @@ async def is_emby_admin(emby_id: str):
         return None
 
 
-def create_policy(admin=False, disable=False, limit: int = 2, block: list = None,
-                  whitelist: bool = False, tg=None):
+def create_policy(admin=False, disable=False, limit: int = 2, block: list = None):
     """
     创建用户策略
     :param admin: bool 是否开启管理员
     :param disable: bool 是否禁用
     :param limit: int 同时播放流的默认值，修改2 -> 3 any都可以
     :param block: list 默认将 播放列表 屏蔽
-    :param whitelist: bool 是否按白名单码率设置播放速率限制
-    :param tg: 该用户的 Telegram id，用于判定 bot 管理员豁免（未知则 None）
     :return: policy 用户策略
     """
     if block is None:
@@ -129,7 +83,6 @@ def create_policy(admin=False, disable=False, limit: int = 2, block: list = None
         "SimultaneousStreamLimit": limit,
         "BlockedMediaFolders": block,
         "AllowCameraUpload": False,  # 新版api 控制开关相机上传
-        "RemoteClientBitrateLimit": _rate_limit_bps(whitelist=whitelist, admin=admin, tg=tg)
     }
     return policy
 
@@ -382,11 +335,7 @@ class Embyservice(metaclass=Singleton):
                     return False
                 
                 # 3. 设置策略
-                # 建档时即写入播放速率限制：反查 bot 记录判定白名单码率与 bot 管理员豁免。
-                # 此刻 embyid 尚未写回数据库，按 name 命中记录；查不到则按普通用户处理。
-                emby_record = sql_get_emby(name)
-                policy = create_policy(False, False, whitelist=_is_whitelist_user(emby_record),
-                                       tg=getattr(emby_record, 'tg', None))
+                policy = create_policy(False, False)
                 result = await self._request('POST', f'/emby/Users/{user_id}/Policy', json=policy)
                 if not result.success:
                     LOGGER.error(f"设置策略失败: {result.error}")
@@ -491,19 +440,10 @@ class Embyservice(metaclass=Singleton):
             if block is None:
                 block = emby_block
 
-            # 反查 bot 记录：本方法会整体重建策略，必须带上正确的码率，
-            # 否则白名单用户/管理员被改媒体库权限后会被降回普通用户码率
-            # （emby_id 为空时不做反查：Emby.embyid == None 会退化成 IS NULL 命中任意一行）
-            emby_record = sql_get_emby(emby_id) if emby_id else None
-            policy_kwargs = {
-                "whitelist": _is_whitelist_user(emby_record),
-                "tg": getattr(emby_record, 'tg', None),
-            }
-
             if stats == 0:
-                policy = create_policy(False, False, block=block, **policy_kwargs)
+                policy = create_policy(False, False, block=block)
             else:
-                policy = create_policy(False, False, **policy_kwargs)
+                policy = create_policy(False, False)
                 
             result = await self._request('POST', f'/emby/Users/{emby_id}/Policy', json=policy)
             if result.success:
@@ -810,19 +750,7 @@ class Embyservice(metaclass=Singleton):
             else:
                 LOGGER.warning(f"获取用户当前策略失败，将使用默认策略更新: {emby_id} - {user_result.error}")
 
-            # 反查 bot 记录：重建策略时必须带上正确的播放速率限制，
-            # 白名单按 playback_rate_limit_whitelist，bot 管理员与 Emby 管理员豁免（0）
-            whitelist = False
-            tg = None
-            # emby_id 为空时不做反查：Emby.embyid == None 会退化成 IS NULL 命中任意一行
-            emby_record = sql_get_emby(emby_id) if emby_id else None
-            if emby_record is None:
-                LOGGER.warning(f"未找到 {emby_id} 对应的 bot 用户记录，播放速率限制按普通用户处理")
-            else:
-                whitelist = _is_whitelist_user(emby_record)
-                tg = emby_record.tg
-
-            policy = create_policy(admin=admin, disable=disable, whitelist=whitelist, tg=tg)
+            policy = create_policy(admin=admin, disable=disable)
             if current_policy:
                 policy.update({
                     "EnableAllFolders": current_policy.get("EnableAllFolders", False),
@@ -840,81 +768,6 @@ class Embyservice(metaclass=Singleton):
         except Exception as e:
             LOGGER.error(f"修改用户策略异常: {emby_id} - {str(e)}")
             return False
-
-    async def emby_apply_rate_limit_to_all(self) -> Tuple[int, int]:
-        """
-        立即把当前播放速率限制应用到全部 Emby 用户（面板「立即应用到全部用户」调用）。
-
-        安全约定：**只改 `RemoteClientBitrateLimit` 一个字段**——取回该用户现有 Policy，
-        覆盖这一个键后原样 POST 回去。绝不能改用 `emby_change_policy()` 遍历：
-        那个函数会用 `create_policy(admin=False)` 整体重建策略，**会把 Emby 管理员降权**。
-
-        豁免：Emby 管理员（Policy.IsAdministrator）与 bot 管理员（owner + config.admins）写 0（不限速）；
-        其余按白名单/普通用户码率取值，查不到 bot 记录按普通用户处理。
-        幂等：当前值已等于目标值时跳过，不发 POST。
-
-        :return: (成功数, 失败数)
-        """
-        success_count = 0
-        fail_count = 0
-        skip_count = 0
-        try:
-            users_result = await self._request('GET', '/emby/Users')
-            if not users_result.success or not users_result.data:
-                LOGGER.error(f"获取 Emby 用户列表失败，播放速率限制未应用: {users_result.error}")
-                return 0, 0
-
-            for user in users_result.data:
-                user_id = user.get('Id') if isinstance(user, dict) else None
-                if not user_id:
-                    continue
-                try:
-                    policy = dict((user.get('Policy') or {})) if isinstance(user, dict) else {}
-                    if not policy:
-                        # 列表接口未带 Policy 时单独取一次；取不到就跳过，
-                        # 绝不 POST 空策略（那会清空该用户的全部权限设置）
-                        detail = await self._request('GET', f'/emby/Users/{user_id}')
-                        policy = dict((detail.data or {}).get('Policy') or {}) if detail.success else {}
-                    if not policy:
-                        skip_count += 1
-                        LOGGER.warning(f"无法获取用户现有策略，跳过以免清空策略: {user_id}")
-                        continue
-
-                    is_admin = bool(policy.get('IsAdministrator', False))
-                    emby_record = sql_get_emby(user_id)
-                    target_limit = _rate_limit_bps(
-                        whitelist=_is_whitelist_user(emby_record),
-                        admin=is_admin,
-                        tg=getattr(emby_record, 'tg', None),
-                    )
-
-                    try:
-                        current_limit = int(policy.get('RemoteClientBitrateLimit') or 0)
-                    except (TypeError, ValueError):
-                        current_limit = None
-                    if current_limit == target_limit:
-                        skip_count += 1
-                        continue
-
-                    policy['RemoteClientBitrateLimit'] = target_limit
-                    post_result = await self._request('POST', f'/emby/Users/{user_id}/Policy', json=policy)
-                    if post_result.success:
-                        success_count += 1
-                        LOGGER.info(f"已应用播放速率限制: {user_id} -> {target_limit} bit/s")
-                    else:
-                        fail_count += 1
-                        LOGGER.error(f"应用播放速率限制失败: {user_id} - {post_result.error}")
-                except Exception as e:
-                    # 单个用户失败不中断整体
-                    fail_count += 1
-                    LOGGER.error(f"应用播放速率限制异常: {user_id} - {str(e)}")
-
-            LOGGER.info(
-                f"播放速率限制应用完成：成功 {success_count} 个，失败 {fail_count} 个，跳过 {skip_count} 个"
-            )
-        except Exception as e:
-            LOGGER.error(f"应用播放速率限制任务异常: {str(e)}")
-        return success_count, fail_count
 
     async def authority_account(self, tg_id: int, username: str, password: str = None) -> Tuple[bool, Union[str, int]]:
         """
