@@ -424,7 +424,7 @@ def _warn_count_of(uid) -> int:
         return 0
 
 
-async def cr_kk_ikb(uid, first):
+async def cr_kk_ikb(uid, first, warn_count=None):
     text = ''
     text1 = ''
     keyboard = []
@@ -478,10 +478,14 @@ async def cr_kk_ikb(uid, first):
                 text1 = f"**· 📅 过去30天未有记录**"
         else:
             keyboard.append(['✨ 赠送资格', f'gift-{uid}'])
-        # 并发播放警告计数：只对已注册 Emby 账户的用户展示并开放操作
+        # 并发播放警告计数：只对已注册 Emby 账户的用户展示并开放操作。
+        # warn_count 显式传入时直接用传入值 —— 刚改完计数重渲染面板时不能
+        # 再读一次数据库，否则万一读到旧值，面板文本与原来一模一样，
+        # Telegram 会以 MESSAGE_NOT_MODIFIED 拒绝编辑，表现就是「面板不刷新」。
         warn_line = ''
         if name != '无账户信息':
-            warn_count = _warn_count_of(uid)
+            if warn_count is None:
+                warn_count = _warn_count_of(uid)
             warn_line = f"**· ⚠️ 并发警告** | **{warn_count}** / {config.concurrent_play_warn_threshold} 次\n"
         text += f"**· 🍉 TG&名称** | [{first}](tg://user?id={uid})\n" \
                 f"**· 🍒 识别のID** | `{uid}`\n" \

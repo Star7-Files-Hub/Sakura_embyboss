@@ -250,14 +250,55 @@ async def fuck_off_m(_, call):
 # 只改 `concurrent_warn_count` 一个字段，不碰封禁状态、不碰 Emby 策略。
 # ──────────────────────────────────────────────────────────────────────
 
-async def _refresh_kk_panel(call, uid):
-    """重渲染 /kk 面板，让警告数在界面上立刻更新。失败不影响已写入的计数。"""
+async def _refresh_kk_panel(call, uid, warn_count=None):
+    """
+    重渲染 /kk 面板，让警告数在界面上立刻更新。
+
+    warn_count 必须由调用方把「刚写入的值」传进来：面板文本要反映的是
+    我们刚做的改动，而不是再查一次库的结果。若二次读取拿回旧值，渲染出的
+    文本会与当前消息完全相同，Telegram 会以 MESSAGE_NOT_MODIFIED 拒绝编辑，
+    现象就是「操作成功了但面板不刷新」。
+
+    这里也刻意不走 editMessage()：它会把 MESSAGE_NOT_MODIFIED /
+    MESSAGE_ID_INVALID 这类 BadRequest 静默吞掉（只 return False、不写日志），
+    一旦编辑失败就完全看不到线索。直接编辑并把结果与具体错误 ID 都记下来。
+    """
     try:
         first = await bot.get_chat(uid)
-        text, keyboard = await cr_kk_ikb(uid, first.first_name)
-        await editMessage(call, text, buttons=keyboard)
+        text, keyboard = await cr_kk_ikb(uid, first.first_name, warn_count)
     except Exception as e:
-        LOGGER.error(f"刷新 /kk 面板失败 uid={uid}: {e}")
+        LOGGER.error(f"重渲染 /kk 面板内容失败 uid={uid}: {type(e).__name__}: {e}")
+        return False
+
+    try:
+        await call.message.edit(text=text, disable_web_page_preview=True, reply_markup=keyboard)
+        LOGGER.info(f"/kk 面板已刷新 uid={uid} 警告数={warn_count}")
+        return True
+    except BadRequest as e:
+        err_id = getattr(e, 'ID', '?')
+        if err_id == 'MESSAGE_NOT_MODIFIED':
+            # 面板内容本来就与要渲染的一致，属于正常情况，不需要任何处理
+            LOGGER.info(f"/kk 面板内容未变化，跳过编辑 uid={uid} 警告数={warn_count}")
+            return True
+        LOGGER.error(f"编辑 /kk 面板被 Telegram 拒绝 uid={uid} 警告数={warn_count}: ID={err_id} {e}")
+    except Exception as e:
+        LOGGER.error(f"编辑 /kk 面板失败 uid={uid}: {type(e).__name__}: {e}")
+
+    # 兜底：编辑不了就改发一条新面板。
+    # 宁可多一条消息，也不能出现「数据库改了、提示也弹了，但面板还是旧值」
+    # 这种管理员完全看不出来的静默失败。
+    try:
+        await bot.send_message(chat_id=call.message.chat.id, text=text,
+                               disable_web_page_preview=True, reply_markup=keyboard)
+        LOGGER.warning(f"原面板无法编辑，已改发新面板 uid={uid} 警告数={warn_count}")
+        try:
+            await call.message.delete()
+        except Exception:
+            pass  # 删不掉旧的就留着，不影响正确性
+        return True
+    except Exception as e:
+        LOGGER.error(f"改发新面板也失败 uid={uid}: {type(e).__name__}: {e}")
+        return False
 
 
 def _load_warn_state(uid):
@@ -276,7 +317,7 @@ async def _apply_warn_change(call, uid, new_value, action_desc):
         return False
     await call.answer(action_desc)
     LOGGER.info(f"【admin】：{call.from_user.id} 将 {uid} 的并发警告数调整为 {new_value}")
-    await _refresh_kk_panel(call, uid)
+    await _refresh_kk_panel(call, uid, new_value)
     return True
 
 
@@ -295,7 +336,7 @@ async def kk_warn_minus(_, call):
         return await call.answer("💢 ta 没有注册账户。", show_alert=True)
     if cur <= 0:
         await call.answer("当前警告数已经是 0，无需再减", show_alert=True)
-        return await _refresh_kk_panel(call, uid)
+        return await _refresh_kk_panel(call, uid, cur)
 
     new_value = cur - 1
     await _apply_warn_change(call, uid, new_value, f"✅ 警告数 {cur} → {new_value}")
@@ -316,6 +357,6 @@ async def kk_warn_reset(_, call):
         return await call.answer("💢 ta 没有注册账户。", show_alert=True)
     if cur == 0:
         await call.answer("当前警告数已经是 0", show_alert=True)
-        return await _refresh_kk_panel(call, uid)
+        return await _refresh_kk_panel(call, uid, cur)
 
     await _apply_warn_change(call, uid, 0, f"✅ 警告数已重置为 0（原 {cur}）")
