@@ -34,11 +34,15 @@ try:
     schemas = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(schemas)
 except ModuleNotFoundError as e:
-    print(f"  [SKIP] 本地缺 {e.name}（在容器镜像里），本项改由容器内单独执行")
+    print(f"  [SKIP] 本地缺 {e.name}（容器镜像里有；CI 会先 pip install pydantic）")
     schemas = None
 
-# 模拟线上 config.json：含已删除的三个键
-live_like = {
+# 必须以一份**完整合法**的配置为底再叠加旧键。
+# 原先这里只给了一个残缺的 dict，本地又因为缺 pydantic 走了 SKIP 分支，
+# 于是「全绿」是假象；在容器里真正执行时才暴露 ValidationError（缺 bot_name
+# 等 20 个必填字段）。现在用仓库里的 config_example.json 作底，本项才真的在测东西。
+live_like = json.load(open(f"{REPO}/config_example.json", encoding="utf-8"))
+live_like.update({
     "concurrent_play_limit_enabled": True,
     "concurrent_play_limit": 1,
     "concurrent_play_limit_whitelist_enabled": True,
@@ -49,15 +53,17 @@ live_like = {
     "playback_rate_limit_enabled": True,
     "playback_rate_limit": 8,
     "playback_rate_limit_whitelist": 0,
-}
+})
 cfg = None
 if schemas is not None:
     try:
         cfg = schemas.Config(**live_like)
-        check("含旧限速键的 config.json 仍能加载", True)
+        check("含旧限速键的完整 config.json 仍能加载", True)
     except Exception as e:
-        check("含旧限速键的 config.json 仍能加载", False, f"{type(e).__name__}: {e}")
+        check("含旧限速键的完整 config.json 仍能加载", False, f"{type(e).__name__}: {e}")
         cfg = None
+else:
+    print("  [SKIP] 本项未执行 —— CI 里会装 pydantic，届时会真正跑起来")
 
 if cfg is not None:
     for attr in ("playback_rate_limit_enabled", "playback_rate_limit", "playback_rate_limit_whitelist"):

@@ -28,6 +28,11 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
 
+      # test_removal.py 里有一项要真正加载 pydantic 的 Config 模型。
+      # 不装的话它会静默 SKIP，等于没测 —— 之前「本地全绿」就是这么来的假象。
+      - name: 安装测试依赖
+        run: pip install "pydantic==2.1.1"
+
       - name: 单用户警告调整 / 面板刷新
         run: python tests/test_kk_warn_panel.py
 
