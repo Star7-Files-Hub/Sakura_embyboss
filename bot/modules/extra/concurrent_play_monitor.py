@@ -30,6 +30,19 @@ from bot.func_helper.msg_utils import sendMessage
 from bot.func_helper.utils import judge_admins
 from bot.sql_helper.sql_emby import sql_get_emby, sql_update_emby, Emby
 
+# 停止指令下发后的延迟复验等待秒数。
+#
+# 为什么需要它：Emby 的 `POST /Sessions/{id}/Playing/Stop` 返回 204 只代表**服务端接受了
+# 指令**，客户端真正断流有明显延迟。2026-10-04 在 ChaPanda 的 Emby 4.10 上实测 toe 账号：
+# 13:55:42.9 / 13:55:43.2 两条 Stop 都返回 204，但客户端直到 13:56:06.8 / 13:56:09.9
+# 才上报 Playback stopped（延迟 23.9s / 26.7s）。若当场就宣称"已终止 N 个流"，群里看到的
+# 数字会与 Emby 活动页自相矛盾（活动页里流还挂着），属于误导性文案。
+_STOP_VERIFY_FOLLOWUP = 30
+
+# 异步复验任务的强引用集合。asyncio.create_task 的返回值若不持有引用，
+# 任务可能在执行途中被 GC 回收（Python 官方文档明确提示）。
+_VERIFY_TASKS = set()
+
 
 def _now_str():
     """返回当前北京时间字符串"""
@@ -66,16 +79,97 @@ async def _notify_session(session_id: str, text: str):
     })
 
 
+async def _sessions_still_playing(session_ids) -> set:
+    """
+    重新拉一次会话列表，返回其中**仍在播放**的 session id 集合。
+
+    :param session_ids: 需要复验的 session id 集合
+    :return: set（可能为空）；**取不到会话列表时返回 None**，表示"无法确认"，
+             调用方据此避免把"查不到"当成"已经停掉"来谎报成功。
+    """
+    try:
+        result = await emby._request("GET", "/emby/Sessions")
+    except Exception as e:
+        LOGGER.warning(f"复验会话状态失败（按无法确认处理）: {type(e).__name__}: {e}")
+        return None
+    if not result.success or not isinstance(result.data, list):
+        LOGGER.warning(
+            f"复验会话状态失败（按无法确认处理）: {getattr(result, 'error', None) or '返回不是列表'}"
+        )
+        return None
+
+    still = set()
+    for s in result.data:
+        sid = s.get("Id")
+        if sid in session_ids and s.get("NowPlayingItem"):
+            still.add(sid)
+    return still
+
+
+async def _verify_stop_followup(session_ids, user_name, wait: int = None):
+    """
+    延迟复验：确认这些会话是否**真的**断流，并把实测结果补发到群里。
+
+    单独补发而不是当场下结论的原因见模块顶部 _STOP_VERIFY_FOLLOWUP 的说明：
+    Stop 返回 204 时客户端往往还在播，当场宣称"已终止"会与 Emby 活动页矛盾。
+    """
+    wait = _STOP_VERIFY_FOLLOWUP if wait is None else wait
+    try:
+        await asyncio.sleep(wait)
+        total = len(session_ids)
+        still = await _sessions_still_playing(set(session_ids))
+
+        if still is None:
+            await send_group_announcement(
+                f"🔎 **终止复验**\n用户: `{user_name}`\n"
+                f"⚠️ 无法获取会话状态，**未能确认**是否已停止，请到 Emby 活动页核对。"
+            )
+            LOGGER.warning(f"终止复验: user={user_name}, 结果=无法确认")
+            return
+
+        stopped = total - len(still)
+        if not still:
+            await send_group_announcement(
+                f"🔎 **终止复验**\n用户: `{user_name}`\n"
+                f"✅ 已确认全部断开: **{stopped}/{total}** 个流。"
+            )
+        else:
+            await send_group_announcement(
+                f"🔎 **终止复验**\n用户: `{user_name}`\n"
+                f"✅ 已断开: **{stopped}** 个 | ⚠️ {wait} 秒后仍在播放: **{len(still)}** 个\n"
+                f"请手动处理仍在播放的会话。"
+            )
+        LOGGER.info(
+            f"终止复验: user={user_name}, 已断开={stopped}, 仍在播放={len(still)}, 等待={wait}s"
+        )
+    except Exception as e:
+        LOGGER.error(f"终止复验失败: user={user_name}, error={type(e).__name__}: {e}")
+
+
+def _schedule_stop_verify(session_ids, user_name):
+    """启动异步复验任务，并持有强引用避免被 GC 回收。"""
+    task = asyncio.create_task(_verify_stop_followup(session_ids, user_name))
+    _VERIFY_TASKS.add(task)
+    task.add_done_callback(_VERIFY_TASKS.discard)
+    return task
+
+
 async def terminate_all_user_sessions(emby_user_id: str, sessions: list, reason: str = "同时播放超出限制"):
     """
     终止某用户的所有播放会话
+
     :param emby_user_id: Emby 用户ID
     :param sessions: 会话列表
     :param reason: 终止原因
-    :return: (成功数, 失败数)
+    :return: (accepted, rejected, accepted_ids)
+        accepted     - 服务端**接受**停止指令的会话数（HTTP 2xx）。
+                       注意这**不代表客户端已断流**，真实结果要靠 _verify_stop_followup 复验
+        rejected     - 服务端**拒绝**的会话数（非 2xx）
+        accepted_ids - 被接受的 session id 列表，供调用方做延迟复验
     """
-    success_count = 0
-    fail_count = 0
+    accepted = 0
+    rejected = 0
+    accepted_ids = []
 
     for session in sessions:
         session_id = session.get("Id")
@@ -85,16 +179,17 @@ async def terminate_all_user_sessions(emby_user_id: str, sessions: list, reason:
         # 停止播放
         stop_result = await emby._request('POST', f'/emby/Sessions/{session_id}/Playing/Stop')
         if stop_result.success:
-            success_count += 1
-            # 通知放在停止成功之后：避免"弹窗说已终止、实际没停掉"
+            accepted += 1
+            accepted_ids.append(session_id)
+            # 通知放在停止指令被接受之后：避免"弹窗说已终止、实际没下发"
             await _notify_session(session_id, f"🚫 {reason}，您的播放流已被终止。")
             continue
 
         LOGGER.warning(f"终止会话失败: session={session_id}, user={emby_user_id}, error={stop_result.error}")
 
-        fail_count += 1
+        rejected += 1
 
-    return success_count, fail_count
+    return accepted, rejected, accepted_ids
 
 
 async def send_group_announcement(text: str):
@@ -256,14 +351,23 @@ async def check_concurrent_play_limit():
             client_name = session.get("Client", "未知设备")
             violation_msg += f"  {idx}. 🎬 `{media_name}` | 📱 {client_name}\n"
 
-        # 终止所有流
-        success, fail = await terminate_all_user_sessions(
+        # 终止所有流。
+        # 注意：这里拿到的是"服务端是否**接受**了停止指令"，不是"客户端是否已断流"。
+        # Emby 的 Stop 返回 204 后客户端可能还要 20~30 秒才真正断开（2026-10-04 实测
+        # 23.9s/26.7s），所以文案必须区分「已下发」与「已确认停止」，
+        # 真实结果由 _verify_stop_followup 在延迟后补发，绝不在这里谎报"已终止"。
+        accepted, rejected, accepted_ids = await terminate_all_user_sessions(
             emby_user_id, sessions,
             reason=f"同时播放超出限制({stream_count}/{user_limit})"
         )
-        violation_msg += f"\n✅ 已终止: {success} 个流"
-        if fail > 0:
-            violation_msg += f" | ❌ 失败: {fail} 个流"
+        violation_msg += f"\n✅ 已下发停止指令: {accepted} 个流"
+        if rejected > 0:
+            violation_msg += f" | ❌ 服务端拒绝: {rejected} 个流"
+        if accepted > 0:
+            violation_msg += (
+                f"\n🔎 终止复验结果将在 {_STOP_VERIFY_FOLLOWUP} 秒后补发"
+                f"（客户端断流通常有 20~30 秒延迟，此刻流可能还在播）"
+            )
 
         # 更新警告计数
         new_warn_count = current_warns + 1
@@ -280,17 +384,20 @@ async def check_concurrent_play_limit():
         else:
             violation_msg += f"\n\n⚠️ 再犯 **{warn_threshold - new_warn_count}** 次将自动封禁账号！"
 
-        # 向用户发送警告（文案按实际终止结果生成，避免"没停掉却说已终止"）
+        # 向用户发送警告（文案按实际下发结果生成，避免"没停掉却说已终止"）
         if tg_id:
-            if fail == 0:
-                enforce_line = "所有播放流已被强制终止。"
-            elif success == 0:
+            if accepted == 0:
                 enforce_line = (
-                    "⚠️ 播放流终止失败，请**立即手动停止播放**，否则将直接封禁账号。"
+                    "⚠️ 播放流停止指令**未能下发**，请**立即手动停止播放**，"
+                    "否则将直接封禁账号。"
+                )
+            elif rejected == 0:
+                enforce_line = (
+                    "已向你的播放设备下发停止指令（客户端通常需要 20~30 秒才会真正断开）。"
                 )
             else:
                 enforce_line = (
-                    f"⚠️ 已终止 {success} 个流，另有 {fail} 个流终止失败，"
+                    f"已下发 {accepted} 个流的停止指令，另有 {rejected} 个流服务端拒绝，"
                     f"请**立即手动停止播放**，否则将直接封禁账号。"
                 )
             user_warn_msg = (
@@ -304,7 +411,17 @@ async def check_concurrent_play_limit():
 
         # 群内通报
         await send_group_announcement(violation_msg)
-        LOGGER.info(f"同时播放限制: user={user_name}, streams={stream_count}, warns={new_warn_count}")
+
+        # 延迟复验：Stop 返回 204 只代表服务端接受了指令，客户端断流有 20~30 秒延迟。
+        # 这里起一个后台任务，等 _STOP_VERIFY_FOLLOWUP 秒后重新拉会话列表，
+        # 把**实测**的断开数量补发到群里 —— 不阻塞本轮检测，也不当场谎报"已终止"。
+        if accepted_ids:
+            _schedule_stop_verify(accepted_ids, user_name)
+
+        LOGGER.info(
+            f"同时播放限制: user={user_name}, streams={stream_count}, warns={new_warn_count}, "
+            f"停止指令已下发={accepted}, 服务端拒绝={rejected}"
+        )
 
 
 def sql_get_by_embyid(embyid: str):
