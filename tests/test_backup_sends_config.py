@@ -99,6 +99,12 @@ def run(fn, *a):
     return asyncio.new_event_loop().run_until_complete(fn(*a))
 
 
+def at(calls, i):
+    """安全取第 i 次调用。缺条目时返回空 dict —— 让 check() 记 FAIL 并继续，
+    而不是抛 IndexError 把后面所有断言一起带崩（在旧镜像上实测踩到过）。"""
+    return calls[i] if i < len(calls) else {}
+
+
 print("════════ 1. 正常备份：.sql 与 config.json 一起发给 owner ════════")
 SQL = "/app/db_backup/embyboss-2026-10-04-17-45-53.sql"
 fn, bot, logs = make_ns(SQL)
@@ -108,11 +114,11 @@ check("send_document 被调用 2 次（数据库 + 配置）", len(bot.calls) ==
 check("两次都发往 owner 本人",
       all(c.get("chat_id") == OWNER for c in bot.calls), str([c.get("chat_id") for c in bot.calls]))
 check("第一次发的是数据库 .sql",
-      str(bot.calls[0].get("document", "")).endswith(".sql"), str(bot.calls[0]))
+      str(at(bot.calls, 0).get("document", "")).endswith(".sql"), str(at(bot.calls, 0)))
 check("第二次发的是 config.json",
-      str(bot.calls[1].get("document", "")).endswith("config.json"), str(bot.calls[1]))
+      str(at(bot.calls, 1).get("document", "")).endswith("config.json"), str(at(bot.calls, 1)))
 check("配置备份的 caption 标明是 config",
-      "config" in str(bot.calls[1].get("caption", "")), str(bot.calls[1].get("caption")))
+      "config" in str(at(bot.calls, 1).get("caption", "")), str(at(bot.calls, 1).get("caption")))
 check("两个文件都是静默发送（勿打扰）",
       all(c.get("disable_notification") is True for c in bot.calls), str(bot.calls))
 check("备份成功时不记 error", not any(lvl == "error" for lvl, _ in logs), str(logs))
@@ -133,14 +139,14 @@ print("════════ 3. 一个发送失败不能把另一个也拖掉
 fn, bot, logs = make_ns(SQL, fail_on=(".sql",))
 run(fn)
 check("数据库发送失败后，config.json 仍然被发送",
-      len(bot.calls) == 2 and str(bot.calls[1].get("document", "")).endswith("config.json"),
+      len(bot.calls) == 2 and str(at(bot.calls, 1).get("document", "")).endswith("config.json"),
       str(bot.calls))
 check("发送失败被记录（不静默）", any("失败" in m for _, m in logs), str(logs))
 
 fn, bot, logs = make_ns(SQL, fail_on=("config.json",))
 run(fn)
 check("config.json 发送失败不影响数据库备份已发出",
-      len(bot.calls) == 2 and str(bot.calls[0].get("document", "")).endswith(".sql"),
+      len(bot.calls) == 2 and str(at(bot.calls, 0).get("document", "")).endswith(".sql"),
       str(bot.calls))
 check("config 发送失败也被记录", any("config.json" in m for _, m in logs), str(logs))
 
