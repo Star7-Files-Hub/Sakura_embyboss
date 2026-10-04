@@ -239,3 +239,83 @@ async def fuck_off_m(_, call):
     except pyrogram.errors.UserAdminInvalid:
         await editMessage(call,
                           f"⚠️ 打咩，no，机器人不可以对群组管理员出手喔，请[自己](tg://user?id={call.from_user.id})解决")
+
+
+# ──────────────────────────────────────────────────────────────────────
+# 单用户并发警告管理：警告 -1 / 重置为 0
+#
+# 背景：并发检测的警告计数原先只能「整体重置」，遇到误判、或者管理员
+# 想对某个用户网开一面时，没法只动一个人的计数。这里把单用户操作挂到
+# /kk 面板上（那是既有的单用户管理面板），并复用它的管理员校验。
+# 只改 `concurrent_warn_count` 一个字段，不碰封禁状态、不碰 Emby 策略。
+# ──────────────────────────────────────────────────────────────────────
+
+async def _refresh_kk_panel(call, uid):
+    """重渲染 /kk 面板，让警告数在界面上立刻更新。失败不影响已写入的计数。"""
+    try:
+        first = await bot.get_chat(uid)
+        text, keyboard = await cr_kk_ikb(uid, first.first_name)
+        await editMessage(call, text, buttons=keyboard)
+    except Exception as e:
+        LOGGER.error(f"刷新 /kk 面板失败 uid={uid}: {e}")
+
+
+def _load_warn_state(uid):
+    """返回 (emby记录, 当前警告数, 阈值)；用户不存在时第一个元素为 None。"""
+    e = sql_get_emby(uid)
+    if e is None:
+        return None, 0, config.concurrent_play_warn_threshold
+    return e, int(e.concurrent_warn_count or 0), config.concurrent_play_warn_threshold
+
+
+async def _apply_warn_change(call, uid, new_value, action_desc):
+    """写入新的警告数并刷新面板。"""
+    if sql_update_emby(Emby.tg == uid, concurrent_warn_count=new_value) is not True:
+        LOGGER.error(f"【admin】：{call.from_user.id} 调整 {uid} 并发警告数失败（数据库写入错误）")
+        await call.answer("⚠️ 数据库写入失败，请查看日志", show_alert=True)
+        return False
+    await call.answer(action_desc)
+    LOGGER.info(f"【admin】：{call.from_user.id} 将 {uid} 的并发警告数调整为 {new_value}")
+    await _refresh_kk_panel(call, uid)
+    return True
+
+
+@bot.on_callback_query(filters.regex('^warn_minus-'))
+async def kk_warn_minus(_, call):
+    if not judge_admins(call.from_user.id):
+        return await call.answer("请不要以下犯上 ok？", show_alert=True)
+
+    try:
+        uid = int(call.data.split("-")[1])
+    except (IndexError, ValueError):
+        return await call.answer("❌ 数据格式错误", show_alert=True)
+
+    e, cur, _threshold = _load_warn_state(uid)
+    if e is None:
+        return await call.answer("💢 ta 没有注册账户。", show_alert=True)
+    if cur <= 0:
+        await call.answer("当前警告数已经是 0，无需再减", show_alert=True)
+        return await _refresh_kk_panel(call, uid)
+
+    new_value = cur - 1
+    await _apply_warn_change(call, uid, new_value, f"✅ 警告数 {cur} → {new_value}")
+
+
+@bot.on_callback_query(filters.regex('^warn_reset-'))
+async def kk_warn_reset(_, call):
+    if not judge_admins(call.from_user.id):
+        return await call.answer("请不要以下犯上 ok？", show_alert=True)
+
+    try:
+        uid = int(call.data.split("-")[1])
+    except (IndexError, ValueError):
+        return await call.answer("❌ 数据格式错误", show_alert=True)
+
+    e, cur, _threshold = _load_warn_state(uid)
+    if e is None:
+        return await call.answer("💢 ta 没有注册账户。", show_alert=True)
+    if cur == 0:
+        await call.answer("当前警告数已经是 0", show_alert=True)
+        return await _refresh_kk_panel(call, uid)
+
+    await _apply_warn_change(call, uid, 0, f"✅ 警告数已重置为 0（原 {cur}）")

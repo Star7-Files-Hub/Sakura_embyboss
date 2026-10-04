@@ -408,6 +408,22 @@ register_code_ikb = ikb([[('🎟️ 注册', 'create'), ('⭕ 取消', 'closeit'
 dp_g_ikb = ikb([[("🈺 ╰(￣ω￣ｏ)", "t.me/Aaaaa_su", "url")]])
 
 
+def _warn_count_of(uid) -> int:
+    """
+    读取单个用户的并发播放警告计数。
+
+    查不到记录、字段为 NULL 或任何异常，一律返回 0 —— /kk 面板不能因为
+    一个统计字段读失败就整个打不开。
+    """
+    try:
+        from bot.sql_helper.sql_emby import sql_get_emby
+        e = sql_get_emby(uid)
+        return int(e.concurrent_warn_count or 0) if e is not None else 0
+    except Exception as exc:
+        LOGGER.warning(f"读取并发警告计数失败 tg={uid}: {exc}")
+        return 0
+
+
 async def cr_kk_ikb(uid, first):
     text = ''
     text1 = ''
@@ -462,15 +478,25 @@ async def cr_kk_ikb(uid, first):
                 text1 = f"**· 📅 过去30天未有记录**"
         else:
             keyboard.append(['✨ 赠送资格', f'gift-{uid}'])
+        # 并发播放警告计数：只对已注册 Emby 账户的用户展示并开放操作
+        warn_line = ''
+        if name != '无账户信息':
+            warn_count = _warn_count_of(uid)
+            warn_line = f"**· ⚠️ 并发警告** | **{warn_count}** / {config.concurrent_play_warn_threshold} 次\n"
         text += f"**· 🍉 TG&名称** | [{first}](tg://user?id={uid})\n" \
                 f"**· 🍒 识别のID** | `{uid}`\n" \
                 f"**· 🍓 当前状态** | {lv}\n" \
                 f"**· 🍥 持有{sakura_b}** | {iv}\n" \
                 f"**· 💠 账号名称** | {name}\n" \
-                f"**· 🚨 到期时间** | **{ex}**\n"
+                f"**· 🚨 到期时间** | **{ex}**\n" \
+                f"{warn_line}"
         text += text1
-        keyboard.extend([['🚫 踢出并封禁', f'fuckoff-{uid}'], ['❌ 删除消息', f'closeit']])
+        # 警告管理固定单独成行：不能参与上面的 array_chunk，
+        # 否则「额外媒体库」按钮在不在（条目奇偶）会把这一行拆散错位。
         lines = array_chunk(keyboard, 2)
+        if name != '无账户信息':
+            lines.append([['➖ 警告-1', f'warn_minus-{uid}'], ['🔄 重置警告', f'warn_reset-{uid}']])
+        lines.append([['🚫 踢出并封禁', f'fuckoff-{uid}'], ['❌ 删除消息', f'closeit']])
         keyboard = ikb(lines)
     return text, keyboard
 
