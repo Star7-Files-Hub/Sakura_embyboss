@@ -372,6 +372,8 @@ async def check_concurrent_play_limit():
         # 更新警告计数
         new_warn_count = current_warns + 1
         sql_update_emby(Emby.tg == tg_id, concurrent_warn_count=new_warn_count)
+        if tg_id:
+            await _sync_kk_panels(tg_id)
 
         # 判断是否超过警告阈值
         if new_warn_count >= warn_threshold:
@@ -439,6 +441,23 @@ def sql_get_by_embyid(embyid: str):
             return None
 
 
+async def _sync_kk_panels(uid=None):
+    """
+    把已打开的 /kk 面板同步到最新警告计数。
+
+    并发检测改了 concurrent_warn_count 却不刷新面板时，面板就会停在改动前的
+    值；管理员随后点「➖ 警告-1」，写回的值可能正好等于面板上已经显示的值，
+    Telegram 会以 MESSAGE_NOT_MODIFIED 拒绝编辑，表现为「操作成功但数字没动」。
+
+    纯尽力而为：任何异常都吞掉，绝不能让面板同步拖垮每 60 秒跑一次的检测任务。
+    """
+    try:
+        from bot.modules.panel.kk import sync_kk_panel
+        await sync_kk_panel(uid)
+    except Exception as e:
+        LOGGER.debug(f"同步 /kk 面板跳过: {type(e).__name__}: {e}")
+
+
 async def reset_all_warn_counts():
     """
     重置所有用户的警告计数（可用于定期清零）
@@ -450,6 +469,7 @@ async def reset_all_warn_counts():
             session.query(EmbyModel).update({EmbyModel.concurrent_warn_count: 0})
             session.commit()
             LOGGER.info("已重置所有用户的同时播放警告计数")
+            await _sync_kk_panels()
             return True
         except Exception as e:
             LOGGER.error(f"重置警告计数失败: {e}")

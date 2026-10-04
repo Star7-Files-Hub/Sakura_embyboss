@@ -408,20 +408,28 @@ register_code_ikb = ikb([[('🎟️ 注册', 'create'), ('⭕ 取消', 'closeit'
 dp_g_ikb = ikb([[("🈺 ╰(￣ω￣ｏ)", "t.me/Aaaaa_su", "url")]])
 
 
-def _warn_count_of(uid) -> int:
+def _warn_count_of(uid):
     """
     读取单个用户的并发播放警告计数。
 
-    查不到记录、字段为 NULL 或任何异常，一律返回 0 —— /kk 面板不能因为
-    一个统计字段读失败就整个打不开。
+    返回 None 表示「读不到」。必须与真实的 0 区分开：以前任何异常都返回 0，
+    面板就会静默显示一个错误的 0，管理员据此以为这个人没问题 —— 而真相
+    可能是这个人的警告数已经到了阈值。现在读不到就显示「读取失败」。
     """
     try:
         from bot.sql_helper.sql_emby import sql_get_emby
         e = sql_get_emby(uid)
-        return int(e.concurrent_warn_count or 0) if e is not None else 0
     except Exception as exc:
-        LOGGER.warning(f"读取并发警告计数失败 tg={uid}: {exc}")
-        return 0
+        LOGGER.error(f"读取并发警告计数失败 tg={uid}: {type(exc).__name__}: {exc}")
+        return None
+    if e is None:
+        LOGGER.error(f"读取并发警告计数失败 tg={uid}: 数据库中没有该用户记录")
+        return None
+    try:
+        return int(e.concurrent_warn_count or 0)
+    except (TypeError, ValueError) as exc:
+        LOGGER.error(f"并发警告计数字段异常 tg={uid}: {exc!r}")
+        return None
 
 
 async def cr_kk_ikb(uid, first, warn_count=None):
@@ -486,7 +494,11 @@ async def cr_kk_ikb(uid, first, warn_count=None):
         if name != '无账户信息':
             if warn_count is None:
                 warn_count = _warn_count_of(uid)
-            warn_line = f"**· ⚠️ 并发警告** | **{warn_count}** / {config.concurrent_play_warn_threshold} 次\n"
+            # 读不到时不能假装是 0（管理员会以为这个人没问题）。用自解释的文案
+            # 而不是 "?"：这一行普通用户在 /myinfo 里也会看到，一个孤零零的问号
+            # 他们既看不懂也无从处理。
+            shown = '读取失败' if warn_count is None else warn_count
+            warn_line = f"**· ⚠️ 并发警告** | **{shown}** / {config.concurrent_play_warn_threshold} 次\n"
         text += f"**· 🍉 TG&名称** | [{first}](tg://user?id={uid})\n" \
                 f"**· 🍒 识别のID** | `{uid}`\n" \
                 f"**· 🍓 当前状态** | {lv}\n" \

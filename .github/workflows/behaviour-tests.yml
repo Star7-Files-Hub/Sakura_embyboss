@@ -1,0 +1,38 @@
+name: Behaviour tests
+
+# 这些测试用 AST 从真实源文件里抽出函数来执行（只桩外部依赖），
+# 不需要安装 pyrogram / SQLAlchemy，纯标准库即可跑。
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  behaviour-tests:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: 单用户警告调整 / 面板刷新
+        run: python tests/test_kk_warn_panel.py
+
+      - name: 终止流复验
+        run: python tests/test_terminate_verify.py
+
+      - name: 播放速率限制移除
+        run: python tests/test_removal.py

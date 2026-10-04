@@ -142,6 +142,15 @@ async def sendMessage(message, text: str, buttons=None, timer=None, send=False, 
         return str(e)
 
 
+def _edit_target_of(message) -> str:
+    """日志用的「编辑目标」描述；任何属性取不到都不抛异常。"""
+    try:
+        chat_id = getattr(getattr(message, 'chat', None), 'id', None)
+        return f"chat={chat_id} msg={getattr(message, 'id', None)}"
+    except Exception:
+        return "chat=? msg=?"
+
+
 async def editMessage(message, text: str, buttons=None, timer=None, parse_mode: Optional["enums.ParseMode"] = None):
     """
     编辑消息
@@ -162,16 +171,23 @@ async def editMessage(message, text: str, buttons=None, timer=None, parse_mode: 
         await sleep(f.value * 1.2)
         return await editMessage(message, text, buttons, parse_mode=parse_mode)
     except BadRequest as e:
+        # 下面三条以前是彻底静默的（只 return False，一行日志都不写），
+        # 结果「界面没更新」时完全拿不到线索，只能靠猜。至少留下可检索的记录：
+        # MESSAGE_NOT_MODIFIED 记 INFO（内容与目标一致，通常是正常情况，但
+        # 也可能是管理员对着一条陈旧面板操作，需要能查到），另外两条记 WARNING。
+        where = _edit_target_of(message)
         if e.ID == 'BUTTON_URL_INVALID':
             # await editMessage(message, text='⚠️ 底部按钮设置失败。', buttons=back_start_ikb)
+            LOGGER.warning(f"editMessage 失败[{e.ID}] {where}: 底部按钮被 Telegram 拒绝")
             return False
         # 判断是否是因为编辑到一样的消息
         if e.ID == "MESSAGE_NOT_MODIFIED" or e.ID == 'MESSAGE_ID_INVALID':
             # await callAnswer(message, "慢速模式开启，切勿多点\n慢一点，慢一点，生活更有趣 - zztai", True)
+            LOGGER.info(f"editMessage 未生效[{e.ID}] {where}")
             return False
         else:
             # 记录或处理其他异常
-            LOGGER.warning(e)
+            LOGGER.warning(f"editMessage 失败[{e.ID}] {where}: {e}")
     except Exception as e:
         LOGGER.error(str(e))
         return str(e)
