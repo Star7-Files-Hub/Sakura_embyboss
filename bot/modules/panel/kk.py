@@ -334,6 +334,16 @@ async def _refresh_kk_panel(call, uid, warn_count=None):
     看不到线索。直接编辑，并把消息 id、聊天 id、渲染出的警告数都记下来，出问题
     才能区分「文本没变」和「消息不可编辑」。
     """
+    if call.message is None:
+        # 内联消息（inline mode）里的按钮没有可编辑的消息对象。必须在这里显式
+        # 返回 FAILED，不能放任它往下走：下面兜底分支的 `call.message.chat.id`
+        # 在 try 之外，会抛 AttributeError 一路冒到 handler —— 那样连
+        # callAnswer 都执行不到，Telegram 侧的回调永远得不到答复（一直转圈）。
+        # 返回 FAILED 则走 _apply_warn_change 的失败分支，管理员能看到明确告警。
+        LOGGER.error(f"无法刷新 /kk 面板：call.message 为空（内联消息？）uid={uid} "
+                     f"call={getattr(call, 'id', None)}")
+        return _REFRESH_FAILED
+
     where = (f"uid={uid} chat={getattr(getattr(call.message, 'chat', None), 'id', None)} "
              f"msg={getattr(call.message, 'id', None)} call={getattr(call, 'id', None)}")
 
@@ -342,7 +352,10 @@ async def _refresh_kk_panel(call, uid, warn_count=None):
         text, keyboard = await cr_kk_ikb(uid, first.first_name, warn_count)
     except Exception as e:
         LOGGER.error(f"重渲染 /kk 面板内容失败 {where}: {type(e).__name__}: {e}")
-        return False
+        # 必须是三态里的 FAILED，不能 return False：调用方判的是
+        # `result != _REFRESH_FAILED`，而 False != "failed" 恒为真 ——
+        # 写成 False 会让「重渲染失败」被当成成功（谎报），契约也就废了。
+        return _REFRESH_FAILED
 
     # 编辑；FloodWait 必须自动重试（但有上限）—— 以前走 editMessage() 时它自带
     # 这个重试，自己写编辑就得补上，否则限流下比旧代码更差。
@@ -437,8 +450,13 @@ def _load_warn_state(uid):
     return e, int(e.concurrent_warn_count or 0), config.concurrent_play_warn_threshold
 
 
-async def _apply_warn_change(call, uid, new_value, action_desc):
-    """写入新的警告数并刷新面板；面板刷新失败要让管理员看得见。"""
+async def _apply_warn_change(call, uid, new_value, action_desc, extra_hint=''):
+    """写入新的警告数并刷新面板；面板刷新失败要让管理员看得见。
+
+    extra_hint 由调用方附加到「成功 / 未变」两种文案后面（例如「已达阈值 N」的提醒）。
+    默认空串 —— 不传时文案与以前逐字一致。FAILED 分支刻意不加提示：那时面板根本没
+    刷新成功，先让管理员重新 /kk 看到真实状态，再谈别的。
+    """
     if sql_update_emby(Emby.tg == uid, concurrent_warn_count=new_value) is not True:
         LOGGER.error(f"【admin】：{call.from_user.id} 调整 {uid} 并发警告数失败（数据库写入错误）")
         await call.answer("⚠️ 数据库写入失败，请查看日志", show_alert=True)
@@ -450,6 +468,10 @@ async def _apply_warn_change(call, uid, new_value, action_desc):
     # QUERY_ID_INVALID / "query is too old" 拒绝，管理员就只看到「✅ 已改」，
     # 正是要修的那个静默失败形态。
     result = await _refresh_kk_panel(call, uid, new_value)
+    # 提示语直接拼到 action_desc 上：这样「成功」与「未变」两条既有文案的正文
+    # 一个字都不用动（extra_hint 默认空串时与改动前逐字一致），FAILED 分支也
+    # 不受影响 —— 那时面板根本没刷新成功，先让管理员重新 /kk 看到真实状态。
+    action_desc = f"{action_desc}{extra_hint}"
     if result == _REFRESH_EDITED:
         await call.answer(action_desc)
     elif result == _REFRESH_UNCHANGED:
@@ -460,19 +482,65 @@ async def _apply_warn_change(call, uid, new_value, action_desc):
     return result != _REFRESH_FAILED
 
 
-@bot.on_callback_query(filters.regex('^warn_minus-'))
-async def kk_warn_minus(_, call):
+async def _warn_button_precheck(call):
+    """
+    「➕ 警告+1 / ➖ 警告-1 / 🔄 重置警告」三个按钮共用的前置校验。
+
+    成功返回 (uid, emby记录, 当前警告数, 阈值)；任何一项不通过都返回 None，
+    并且**已经自己 call.answer 过了** —— 调用方直接 `return` 即可，
+    绝不能再答一次（Telegram 的回调应答是一次性的，第二次会被以
+    QUERY_ID_INVALID / "query is too old" 拒绝）。
+
+    为什么收敛到一处：这三段以前是各自抄一遍「判管理员 / 解析 uid / 查用户」，
+    抄漏任何一处就是「非管理员也能改计数」，多答一次就是「管理员只看到第一条」。
+    收在一处，这两个坑各自只可能踩一次。
+    """
     if not judge_admins(call.from_user.id):
-        return await call.answer("请不要以下犯上 ok？", show_alert=True)
+        await call.answer("请不要以下犯上 ok？", show_alert=True)
+        return None
 
     try:
         uid = int(call.data.split("-")[1])
     except (IndexError, ValueError):
-        return await call.answer("❌ 数据格式错误", show_alert=True)
+        await call.answer("❌ 数据格式错误", show_alert=True)
+        return None
 
-    e, cur, _threshold = _load_warn_state(uid)
+    e, cur, threshold = _load_warn_state(uid)
     if e is None:
-        return await call.answer("💢 ta 没有注册账户。", show_alert=True)
+        await call.answer("💢 ta 没有注册账户。", show_alert=True)
+        return None
+    return uid, e, cur, threshold
+
+
+@bot.on_callback_query(filters.regex('^warn_plus-'))
+async def kk_warn_plus(_, call):
+    pre = await _warn_button_precheck(call)
+    if pre is None:
+        return
+
+    uid, _e, cur, threshold = pre
+    new_value = cur + 1
+
+    # 手动 +1 **不自动封禁**：并发检测任务在 new_warn_count >= 阈值时会自己调
+    # ban_user，那是检测任务自己的路径。手动调整与「➖ 警告-1 不会自动解封」对称，
+    # 只写计数。但要让管理员知道已经到线了 —— 否则他会以为点完就完事了，
+    # 而实际封不封、什么时候封，是检测任务下一轮的事。
+    if new_value >= threshold:
+        extra_hint = (f"；已达/超过阈值 {threshold}，如需封禁请点『💢 禁用账户』"
+                      f"（手动调整不会自动封禁）")
+    else:
+        extra_hint = ""
+
+    await _apply_warn_change(call, uid, new_value, f"✅ 警告数 {cur} → {new_value}", extra_hint)
+
+
+@bot.on_callback_query(filters.regex('^warn_minus-'))
+async def kk_warn_minus(_, call):
+    pre = await _warn_button_precheck(call)
+    if pre is None:
+        return
+
+    uid, _e, cur, _threshold = pre
     if cur <= 0:
         await call.answer("当前警告数已经是 0，无需再减", show_alert=True)
         return await _refresh_kk_panel(call, uid, cur)
@@ -483,17 +551,11 @@ async def kk_warn_minus(_, call):
 
 @bot.on_callback_query(filters.regex('^warn_reset-'))
 async def kk_warn_reset(_, call):
-    if not judge_admins(call.from_user.id):
-        return await call.answer("请不要以下犯上 ok？", show_alert=True)
+    pre = await _warn_button_precheck(call)
+    if pre is None:
+        return
 
-    try:
-        uid = int(call.data.split("-")[1])
-    except (IndexError, ValueError):
-        return await call.answer("❌ 数据格式错误", show_alert=True)
-
-    e, cur, _threshold = _load_warn_state(uid)
-    if e is None:
-        return await call.answer("💢 ta 没有注册账户。", show_alert=True)
+    uid, _e, cur, _threshold = pre
     if cur == 0:
         await call.answer("当前警告数已经是 0", show_alert=True)
         return await _refresh_kk_panel(call, uid, cur)

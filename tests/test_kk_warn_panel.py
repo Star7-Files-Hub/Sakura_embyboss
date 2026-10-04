@@ -178,6 +178,7 @@ def make_kk_ns(db, edits, is_admin=True):
 
     for fn in extract(f"{REPO}/bot/modules/panel/kk.py",
                       {"_refresh_kk_panel", "_load_warn_state", "_apply_warn_change",
+                       "_warn_button_precheck",
                        "kk_warn_minus", "kk_warn_reset",
                        "_kk_send_with_floodwait", "_send_kk_panel"}).values():
         exec(compile(fn, "kk.py", "exec"), ns)
@@ -342,8 +343,10 @@ warn_rows = [i for i, row in enumerate(kb) if any("warn_minus-" in b[1] for b in
 check("警告按钮独占一行", len(warn_rows) == 1, f"出现在行 {warn_rows}")
 if warn_rows:
     row = kb[warn_rows[0]]
-    check("该行同时含 -1 与 重置 两个按钮",
-          len(row) == 2 and "warn_reset-" in row[1][1], str(row))
+    check("该行同时含 +1 / -1 / 重置 三个按钮",
+          len(row) == 3 and row[0][1].startswith("warn_plus-")
+          and row[1][1].startswith("warn_minus-") and row[2][1].startswith("warn_reset-"),
+          str(row))
 check("最后一行是「踢出并封禁 / 删除消息」",
       "fuckoff-" in kb[-1][0][1] and kb[-1][1][1] == "closeit", str(kb[-1]))
 
@@ -680,6 +683,21 @@ check("FloodWait 秒数超过上限时完全不等待（回调不能被挂住）
 check("超长 FloodWait 后直接走兜底，仍然发出新面板",
       r_big == "edited" and len(sent) == 1, f"r={r_big} sent={len(sent)}")
 
+# call.message 为 None（内联消息里的按钮）必须返回 FAILED，绝不能抛异常。
+# 兜底分支的 `call.message.chat.id` 在 try 之外，抛出去会一路冒到 handler，
+# 连 callAnswer 都执行不到 —— Telegram 侧的回调永远得不到答复。
+logs.clear(); sent.clear()
+_r_none, _exc_none = None, None
+try:
+    _r_none = run(ns_w["_refresh_kk_panel"](FakeCallWith(None), 1, 2))
+except Exception as e:  # noqa: BLE001 - 这里就是要证明它不抛
+    _exc_none = e
+check("call.message 为 None 时不抛异常", _exc_none is None, repr(_exc_none))
+check("call.message 为 None 时返回 FAILED（调用方据此给管理员告警）",
+      _r_none == "failed", repr(_r_none))
+check("call.message 为 None 时不误发新面板", len(sent) == 0, str(sent))
+check("call.message 为 None 时留下 error 日志", any(lvl == "error" for lvl, _ in logs), str(logs))
+
 
 print()
 print("════════ 8. /kk 面板去重：同一用户只保留最新一条 ════════")
@@ -846,6 +864,27 @@ check("UNCHANGED 时提示解释了「外观未变」",
       any("外观未变" in a[0] for a in call_c.answers), str(call_c.answers))
 check("UNCHANGED 时也仍然只应答一次", len(call_c.answers) == 1, str(call_c.answers))
 
+# L1：call.message 为 None（内联消息里的按钮）时，回调必须**仍然得到答复**。
+# 修复前 _refresh_kk_panel 的兜底分支 `call.message.chat.id` 在 try 之外，
+# 会抛 AttributeError 一路冒到 handler，连 callAnswer 都执行不到 ——
+# 管理员点了按钮，Telegram 侧一直转圈，且计数已经写进库了（静默的不一致）。
+db_d = {555: FakeEmbyRow(555, 2)}
+ns_d, _reg_d = make_kk_ns(db_d, [])
+call_d = FakeCall("warn_minus-555")
+call_d.message = None
+_exc_d = None
+try:
+    run(ns_d["kk_warn_minus"](None, call_d))
+except Exception as e:  # noqa: BLE001 - 这里就是要证明它不抛
+    _exc_d = e
+check("call.message 为 None 时 handler 不抛异常", _exc_d is None, repr(_exc_d))
+check("call.message 为 None 时计数仍然写入了（写入发生在刷新之前）",
+      db_d[555].concurrent_warn_count == 1, str(db_d[555].concurrent_warn_count))
+check("call.message 为 None 时回调仍然被答复（不能一直转圈）",
+      len(call_d.answers) == 1, str(call_d.answers))
+check("call.message 为 None 时给的是失败告警，而不是谎报成功",
+      any(a[1] is True and "刷新失败" in a[0] for a in call_d.answers), str(call_d.answers))
+
 
 print()
 print("════════ 11. editMessage 的三条静默分支必须留下日志 ════════")
@@ -907,9 +946,24 @@ print()
 print("════════ 12. 并发检测写入计数后必须回调面板同步 ════════")
 src_mon = open(f"{REPO}/bot/modules/extra/concurrent_play_monitor.py", encoding="utf-8").read()
 check("定义了 _sync_kk_panels", "async def _sync_kk_panels(" in src_mon)
-check("警告 +1 之后立刻调用同步",
-      "sql_update_emby(Emby.tg == tg_id, concurrent_warn_count=new_warn_count)"
-      "\n        if tg_id:\n            await _sync_kk_panels(tg_id)" in src_mon)
+# 这条原来做的是源码**字符串相邻匹配**（写入那行紧接 `if tg_id:` / 同步），
+# 太脆：中间插一行纯同步语句（例如 violation_msg.replace(...)）语义毫无变化，
+# 却会把断言弄红。真正要守的不变量是「写入与面板同步之间不得有 await」——
+# 有 await 才会发生事件循环切换，面板才可能读到旧值。
+_mon_tree = ast.parse(src_mon)
+_mon_fn = next(n for n in _mon_tree.body
+               if isinstance(n, ast.AsyncFunctionDef) and n.name == "check_concurrent_play_limit")
+_mon_body = next(n for n in _mon_fn.body if isinstance(n, ast.For)).body
+_w_idx = next(i for i, n in enumerate(_mon_body)
+              if isinstance(n, ast.Expr) and isinstance(n.value, ast.Call)
+              and getattr(n.value.func, "id", "") == "sql_update_emby"
+              and any(k.arg == "concurrent_warn_count" for k in n.value.keywords))
+_s_idx = next(i for i, n in enumerate(_mon_body)
+              if i > _w_idx and "_sync_kk_panels" in ast.unparse(n))
+_between = _mon_body[_w_idx + 1:_s_idx]
+check("警告 +1 之后调用同步，且两者之间没有 await（有 await 面板就可能读到旧值）",
+      not any(isinstance(x, ast.Await) for n in _between for x in ast.walk(n)),
+      str([ast.unparse(n)[:60] for n in _between]))
 check("全局清零之后调用同步",
       'LOGGER.info("已重置所有用户的同时播放警告计数")\n            await _sync_kk_panels()' in src_mon)
 check("同步用函数内延迟导入（避免循环导入）",

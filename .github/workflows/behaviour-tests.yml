@@ -44,3 +44,12 @@ jobs:
 
       - name: 备份同时发送 .sql 与 config.json 给 owner
         run: python tests/test_backup_sends_config.py
+
+      - name: 备份收件人硬绑定 owner 私聊（拒绝群组）
+        run: python tests/test_backup_recipient.py
+
+      - name: /kk 警告+1 按钮
+        run: python tests/test_warn_plus_button.py
+
+      - name: 警告计数丢失更新竞态（检测任务 vs 管理员调整）
+        run: python tests/test_warn_count_race.py

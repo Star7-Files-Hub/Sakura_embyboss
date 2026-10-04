@@ -511,7 +511,9 @@ async def cr_kk_ikb(uid, first, warn_count=None):
         # 否则「额外媒体库」按钮在不在（条目奇偶）会把这一行拆散错位。
         lines = array_chunk(keyboard, 2)
         if name != '无账户信息':
-            lines.append([['➖ 警告-1', f'warn_minus-{uid}'], ['🔄 重置警告', f'warn_reset-{uid}']])
+            lines.append([['➕ 警告+1', f'warn_plus-{uid}'],
+                          ['➖ 警告-1', f'warn_minus-{uid}'],
+                          ['🔄 重置警告', f'warn_reset-{uid}']])
         lines.append([['🚫 踢出并封禁', f'fuckoff-{uid}'], ['❌ 删除消息', f'closeit']])
         keyboard = ikb(lines)
     return text, keyboard

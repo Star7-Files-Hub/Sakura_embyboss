@@ -56,7 +56,12 @@ def extract(path, names):
 
 
 SRC = f"{REPO}/bot/scheduler/backup_db.py"
-FUNC_SRC = extract(SRC, {"auto_backup_db"})["auto_backup_db"]
+# 必须把 _backup_chat_id 一起抽出来：auto_backup_db 现在直接调用它。
+# 生产代码里**刻意不保留**「取不到校验函数就退化成宽松判断」的兜底分支 ——
+# 那种兜底会让「校验函数被改名/误删」静默降级成较弱的检查，而不是当场炸出来。
+# 隔离执行环境的正确解法是这里多抽一个函数，不是让生产代码迁就测试。
+FUNCS = extract(SRC, {"auto_backup_db", "_backup_chat_id"})
+FUNC_SRC = FUNCS["auto_backup_db"]
 
 
 class FakeBot:
@@ -73,6 +78,8 @@ class FakeBot:
 
 def make_ns(backup_file, fail_on=()):
     ns = {}
+    # 两个函数都 exec 进同一个命名空间，auto_backup_db 才能解析到 _backup_chat_id
+    exec(compile(FUNCS["_backup_chat_id"], "backup_db.py", "exec"), ns)
     exec(compile(FUNC_SRC, "backup_db.py", "exec"), ns)
     bot = FakeBot(fail_on)
     logs = []

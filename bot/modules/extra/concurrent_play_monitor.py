@@ -43,6 +43,12 @@ _STOP_VERIFY_FOLLOWUP = 30
 # 任务可能在执行途中被 GC 回收（Python 官方文档明确提示）。
 _VERIFY_TASKS = set()
 
+# 违规通知里「累计警告: N / 阈值」那个 N 的占位符。
+# 原因见 check_concurrent_play_limit() 里更新警告计数处：计数必须在终止流的
+# 秒级 I/O **之后**重新读一次再写，所以构建通知文案时还拿不到最终数字，
+# 先用占位符占位，写完计数再回填，避免同一条通知里出现两个互相矛盾的次数。
+_WARN_N_PLACEHOLDER = "\x00WARN_N\x00"
+
 
 def _now_str():
     """返回当前北京时间字符串"""
@@ -331,7 +337,10 @@ async def check_concurrent_play_limit():
 
         user_name = e.name or "未知用户"
         tg_id = e.tg
-        current_warns = e.concurrent_warn_count or 0
+        # 刻意**不在这里**读 concurrent_warn_count：此刻距离真正写计数还隔着
+        # terminate_all_user_sessions() 这段秒级 I/O，读到的值可能已经过期
+        # （管理员在此期间重置/减过警告）。计数一律在写入前重新读取，见下方
+        # 「更新警告计数」处。e 里其余字段（name/lv/tg）不受影响，可继续用。
 
         # 构建违规信息
         now_str = _now_str()
@@ -341,7 +350,7 @@ async def check_concurrent_play_limit():
             f"Emby ID: `{emby_user_id}`\n"
             f"当前播放流: **{stream_count}** 个 (限制: **{user_limit}** 个)\n"
             f"检测时间: {now_str}\n"
-            f"累计警告: **{current_warns + 1}** / **{warn_threshold}** 次\n"
+            f"累计警告: **{_WARN_N_PLACEHOLDER}** / **{warn_threshold}** 次\n"
         )
 
         # 列出正在播放的内容
@@ -369,9 +378,28 @@ async def check_concurrent_play_limit():
                 f"（客户端断流通常有 20~30 秒延迟，此刻流可能还在播）"
             )
 
-        # 更新警告计数
+        # 更新警告计数。
+        #
+        # 【必须在**这里**重新读一次，不能沿用循环开头读到的 current_warns】
+        # 上面 terminate_all_user_sessions() 是秒级的 Emby I/O（客户端真正断流
+        # 还要 20~30 秒），这中间管理员完全可能在 /kk 面板上点「🔄 重置警告」或
+        # 「➖ 警告-1」。而这里是**绝对值写入**，沿用旧值会把管理员的调整静默抹掉：
+        #     任务读到 5 → 管理员重置为 0（面板提示"已重置为 0"）→ 任务回来写 6
+        # 重置就此消失；更糟的是 6 若 ≥ 阈值，同一个流程紧接着就 ban_user ——
+        # 管理员刚重置完，用户反而立刻被自动封禁。
+        #
+        # 重新读与写之间**没有 await**：asyncio 是协作式调度，不会在此处切走，
+        # 所以「读最新值 → 写 +1」这一段对事件循环是原子的，不会再有丢失更新。
+        # （管理员侧 kk.py 的读与写之间同样没有 await，两边因此互为原子操作。）
+        #
+        # 注意不能改成数据库端原子自增（Emby.concurrent_warn_count + 1）：那样
+        # 拿不到写入后的值，而下面的阈值判断与通知文案都需要它。
+        fresh = sql_get_emby(tg=tg_id)
+        current_warns = int(getattr(fresh, "concurrent_warn_count", None) or 0)
         new_warn_count = current_warns + 1
         sql_update_emby(Emby.tg == tg_id, concurrent_warn_count=new_warn_count)
+        # 把通知文案里的占位符换成最终数字，保证全文只出现一个「累计警告」值
+        violation_msg = violation_msg.replace(_WARN_N_PLACEHOLDER, str(new_warn_count))
         if tg_id:
             await _sync_kk_panels(tg_id)
 
