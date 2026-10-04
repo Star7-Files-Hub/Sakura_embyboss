@@ -12,13 +12,6 @@ from pyrogram.types import InlineKeyboardMarkup
 
 from bot.func_helper.filters import admins_on_filter
 from bot.func_helper.fix_bottons import config_preparation, close_it_ikb, back_config_p_ikb, back_set_ikb, mp_config_ikb, client_filter_panel
-
-# go-emby 适配层：自研 Go Emby 服务端未实现 Emby 的 Policy 写接口，播放限速在它上面不生效。
-# 用防御性导入，保证适配层缺失时整个配置面板仍能正常打开。
-try:
-    from bot.func_helper import go_emby
-except Exception:  # pragma: no cover
-    go_emby = None
 from bot.func_helper.msg_utils import deleteMessage, editMessage, callAnswer, callListen, sendPhoto, sendFile
 from bot.func_helper.scheduler import scheduler
 from bot.scheduler.sync_mp_download import sync_download_tasks
@@ -1239,53 +1232,20 @@ def playback_rate_limit_panel() -> InlineKeyboardMarkup:
     return keyboard
 
 
-async def _emby_server_type_text() -> str:
-    """探测并描述当前 Emby 服务端类型，用于在面板上提示功能可用性。"""
-    if go_emby is None:
-        return '未知（go-emby 适配层未加载）'
-    try:
-        server_type = await go_emby.detect_server_type()
-    except Exception as e:
-        return f'探测失败（{type(e).__name__}）'
-    if server_type == go_emby.SERVER_GO_EMBY:
-        return 'go-emby（自研 Go Emby 服务端）'
-    return '官方 Emby'
-
-
 async def _playback_rate_panel_text() -> str:
     """播放速率限制子面板的正文（抽出来是为了让「立即应用」的结果能追加在后面）。"""
     status = '✅ 已开启' if config.playback_rate_limit_enabled else '❌ 未开启'
-    server_text = await _emby_server_type_text()
-
-    # go-emby 把 Policy 写接口做成了空转，限速字段在该服务端恒为 0，必须明确告知不可用，
-    # 否则用户会以为点了「立即应用」就生效了。
-    unsupported = ''
-    if go_emby is not None:
-        try:
-            if await go_emby.detect_server_type() == go_emby.SERVER_GO_EMBY:
-                unsupported = (
-                    "\n⚠️ **当前服务端不支持播放速率限制**\n"
-                    "go-emby 未实现 Emby 的 Policy 写接口"
-                    "（`POST /emby/Users/{id}/Policy` 返回 204 但会丢弃请求体），"
-                    "`RemoteClientBitrateLimit` 在该服务端恒为 0，"
-                    "因此下面的设置与「⚡ 立即应用」**不会生效**。\n"
-                    "（封禁与并发上限已改走该服务端的 `/admin/users`，仍然有效）\n"
-                )
-        except Exception:
-            pass
 
     return (
         f"🎬 **播放速率限制设置**\n\n"
         f"当前状态: **{status}**\n"
-        f"服务端类型: **{server_text}**\n"
         f"普通用户: **{_rate_limit_bps_text(config.playback_rate_limit)}**\n"
         f"白名单用户: **{_rate_limit_bps_text(config.playback_rate_limit_whitelist)}**\n\n"
         f"**换算规则：**1 MB = 1024 × 1024 字节，"
         f"码率(bit/s) = MB/s × 8 × 1024 × 1024\n"
         f"**码率填 0 表示不限速。**\n\n"
         f"**豁免说明：**\n"
-        f"• **bot 管理员与 Emby 管理员始终不限速**（不受本设置影响）\n"
-        f"{unsupported}\n"
+        f"• **bot 管理员与 Emby 管理员始终不限速**（不受本设置影响）\n\n"
         f"**生效时机：**\n"
         f"• 修改码率后需点「⚡ 立即应用到全部用户」，才对**存量用户**生效\n"
         f"• **新用户**建档时自动按当时配置生效\n"
@@ -1389,20 +1349,6 @@ async def set_playback_rate_limit_whitelist(_, call):
 async def apply_playback_rate_limit_all(_, call):
     """立即把当前播放速率限制应用到全部 Emby 用户"""
     await callAnswer(call, '⚡ 正在应用，请稍候…（会向 Emby 发送多次请求）', True)
-    # go-emby 未实现 Policy 写接口，限速字段恒为 0：直接明确拒绝，不要发一堆注定无效的请求
-    if go_emby is not None:
-        try:
-            if await go_emby.detect_server_type() == go_emby.SERVER_GO_EMBY:
-                await editMessage(
-                    call,
-                    "❌ **当前服务端不支持播放速率限制**\n\n"
-                    "go-emby（自研 Go Emby 服务端）未实现 Emby 的 Policy 写接口，"
-                    "`RemoteClientBitrateLimit` 在该服务端恒为 0，无法设置。\n\n"
-                    "封禁与并发上限已改走该服务端的 `/admin/users`，仍然有效。",
-                    buttons=playback_rate_limit_panel())
-                return
-        except Exception:
-            pass
     # 函数内局部导入：本文件模块级没有引入 emby，与其它跨模块调用的写法保持一致
     from bot.func_helper.emby import emby
     try:

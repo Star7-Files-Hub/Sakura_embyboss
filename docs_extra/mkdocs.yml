@@ -56,6 +56,5 @@ nav:
       - 用户功能: Helper.md
       - 同时播放限制: Concurrent_Play_Limit.md
       - 播放速率限制: Playback_Rate_Limit.md
-      - go-emby 兼容性: Go_Emby_Compatibility.md
   - 配置说明: Config_Example.md
   - 特别感谢: thanks.md

@@ -234,13 +234,6 @@ class Config(BaseModel):
     playback_rate_limit: int = 8
     # 白名单用户(lv='a')适用的码率上限（MB/s）
     playback_rate_limit_whitelist: int = 20
-    # Emby 服务端类型：auto=自动探测 / official=官方 Emby / go_emby=自研 go-emby 兼容服务端。
-    # go-emby 未实现 Emby 的 Policy 写接口（POST /emby/Users/{id}/Policy 返回 204 但不落库），
-    # 封禁与并发上限需改走它自研的 /admin/users，因此需要下面两个管理员凭据。
-    emby_server_type: str = 'auto'
-    # go-emby 的 /admin/* 只认「真实管理员账号登录换来的 token」，Emby API Key 会被 403 拒绝
-    emby_admin_user: str = ''
-    emby_admin_password: str = ''
     moviepilot: MP = Field(default_factory=MP)
     auto_update: AutoUpdate = Field(default_factory=AutoUpdate)
     red_envelope: RedEnvelope = Field(default_factory=RedEnvelope)

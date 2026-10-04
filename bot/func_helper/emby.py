@@ -61,57 +61,6 @@ def _rate_limit_bps(whitelist: bool = False, admin: bool = False, tg=None) -> in
     return mb * 1024 * 1024 * 8
 
 
-# go-emby 未实现远程停止播放，该提示只打一次，避免每次拦截都刷 404 日志
-_GO_EMBY_STOP_WARNED = False
-
-
-async def _is_go_emby_server() -> bool:
-    """
-    当前对接的 Emby 是否为 go-emby（自研服务端）。
-
-    延迟导入 go_emby 适配模块：它与 emby.py 由不同任务改动，延迟导入可避免
-    文件尚未落地或出现循环导入时把整个 bot 带崩；任何异常都按官方 Emby 处理，
-    从而保证官方 Emby 的行为完全不变。
-    """
-    try:
-        from bot.func_helper import go_emby
-        return await go_emby.is_go_emby()
-    except Exception as e:
-        LOGGER.warning(f"go-emby 探测失败，按官方 Emby 处理: {e}")
-        return False
-
-
-def _go_emby_admin_client():
-    """
-    取 go-emby 管理员客户端；未落地或凭据不可用时返回 None。
-    仅在 _is_go_emby_server() 为 True 时调用。
-    """
-    from bot.func_helper import go_emby
-    return go_emby.get_go_emby_admin()
-
-
-async def _go_emby_current_state(admin_client, emby_id: str):
-    """
-    读取 go-emby 用户的当前状态，返回 (IsAdministrator, EnableMediaPlayback)；
-    用户不存在或整体取不到时返回 None，单个字段缺失则该位置返回 None（=未知）。
-
-    为什么要单独读一次：服务端只要收到 `allow_playback=false`，就**无条件**
-    `DELETE FROM plays WHERE user_id=?`（即使用户本来就是禁播、值没变）。
-    所以下发前必须先比对当前值，值一致就不要 PUT，否则会反复清空该用户的播放记录/进度。
-
-    字段缺失一律返回 None，调用方只在**明确相等**时才跳过：
-    未知就照常下发，避免「解封」这类正向操作被静默吞掉。
-    """
-    current = await admin_client.get_user(emby_id)
-    if not isinstance(current, dict):
-        return None
-    policy = current.get('Policy') if isinstance(current.get('Policy'), dict) else {}
-    is_admin = policy.get('IsAdministrator')
-    can_play = policy.get('EnableMediaPlayback')
-    return (None if is_admin is None else bool(is_admin),
-            None if can_play is None else bool(can_play))
-
-
 async def is_emby_admin(emby_id: str):
     """
     判断该用户是否是 **Emby 侧** 管理员（`Policy.IsAdministrator`）。
@@ -120,22 +69,13 @@ async def is_emby_admin(emby_id: str):
     `judge_admins()`（站长 owner + `config.admins`）判豁免，而 Emby 侧的
     `IsAdministrator` 不在这个定义里。1 号机的 `admin` 账号恰好**没有在 bot
     里建档**，所以靠「查不到记录就跳过」侥幸豁免 —— 一旦某个 Emby 管理员
-    同时在 bot 里建了档（例如 `lv='b'`），超限时就会走到封禁，而封禁在官方
-    Emby 与 go-emby 上**都会把 `IsAdministrator` 写成 false**
-    （`create_policy(admin=False)` / `PUT /admin/users` 的 `Admin=false`），
-    等于把管理员**永久降权**。go-emby 适配之后这个动作从「空转」变成了
-    「真的生效」，所以必须显式豁免，不能再依赖巧合。
+    同时在 bot 里建了档（例如 `lv='b'`），超限时就会走到封禁，而封禁会把
+    `IsAdministrator` 写成 false（`create_policy(admin=False)`），
+    等于把管理员**永久降权**，所以必须显式豁免，不能再依赖巧合。
 
     :return: True=是 Emby 管理员；False=不是；None=取不到（未知）
     """
     try:
-        if await _is_go_emby_server():
-            admin_client = _go_emby_admin_client()
-            if admin_client is None:
-                return None
-            state = await _go_emby_current_state(admin_client, emby_id)
-            return None if state is None else state[0]
-
         result = await emby._request('GET', f'/emby/Users/{emby_id}')
         if not result.success or not isinstance(result.data, dict):
             return None
@@ -457,34 +397,6 @@ class Embyservice(metaclass=Singleton):
                 await self._delete_orphan_account(user_id, name)
                 return False
 
-            # 3.5 go-emby：Policy 请求体被服务端丢弃，并发上限必须落到自研 /admin/users
-            # 失败只警告，不回滚已建账号（B-H1 的清理逻辑仅覆盖建号/改密/设策略失败）
-            if await _is_go_emby_server():
-                try:
-                    admin_client = _go_emby_admin_client()
-                    if admin_client is None:
-                        LOGGER.warning(f"go-emby 管理员凭据不可用，未设置并发上限: {name} ({user_id})")
-                    else:
-                        # 服务端要求 1..100，越界会被拒，这里夹紧并记录。
-                        # 下界取 1 而不是 0，理由（Lead 决策）：
-                        #   a) 本字段合法值域本来就是 >=1 —— 面板 set_concurrent_play_limit_count()
-                        #      对 count <= 0 直接抛错提示「请输入大于0的数字」；
-                        #   b) 0 只可能来自手改 config.json，属非法值；
-                        #   c) 0 在并发监控里会被当成上限 0（prefilter = min(0, ...)），
-                        #      结果是任何人只要有 1 个流就被处罚，不是「不限」的语义。
-                        raw_limit = int(config.concurrent_play_limit)
-                        max_devices = min(100, max(1, raw_limit))
-                        if max_devices != raw_limit:
-                            LOGGER.warning(
-                                f"并发上限 {raw_limit} 非法或超出 go-emby 允许范围(1..100)，按 {max_devices} 设置"
-                            )
-                        if await admin_client.set_user(user_id, max_devices=max_devices):
-                            LOGGER.info(f"已设置并发上限(go-emby): {name} ({user_id}) max_devices={max_devices}")
-                        else:
-                            LOGGER.warning(f"设置并发上限失败(go-emby): {name} ({user_id})")
-                except Exception as e:
-                    LOGGER.warning(f"设置并发上限异常(go-emby): {name} ({user_id}) - {str(e)}")
-            
             # 4. 隐藏 emby_block 和 extra_emby_libs 媒体库
             try:
                 # 使用封装的隐藏方法
@@ -578,33 +490,6 @@ class Embyservice(metaclass=Singleton):
         try:
             if block is None:
                 block = emby_block
-
-            # go-emby：POST Policy 会 204 但丢弃请求体（封禁/权限全无效），
-            # 改走自研 /admin/users 的 allow_playback
-            if await _is_go_emby_server():
-                admin_client = _go_emby_admin_client()
-                if admin_client is None:
-                    LOGGER.error(f"go-emby 管理员凭据不可用，设置用户权限失败: {emby_id}")
-                    return False
-                # stats==0 阻止访问 -> 禁止播放；stats!=0 允许访问 -> 放开播放。
-                # 只传 allow_playback，max_devices/admin 交由适配层补齐当前值，
-                # 避免写坏并发上限或把 Emby 管理员降权。
-                target_play = (stats != 0)
-                state = await _go_emby_current_state(admin_client, emby_id)
-                if state is None:
-                    LOGGER.error(f"go-emby 找不到用户或读不到状态，设置用户权限失败: {emby_id}")
-                    return False
-                if state[1] is not None and state[1] == target_play:
-                    # 幂等：值已一致就不再 PUT —— 服务端收到 allow_playback=false 会无条件
-                    # DELETE FROM plays，重复下发会反复清空该用户的播放记录/进度。
-                    # 只在"明确读到当前值且相等"时跳过；字段缺失（None）照常下发。
-                    LOGGER.info(f"用户权限已是目标值，跳过(go-emby): {emby_id} allow_playback={target_play}")
-                    return True
-                if await admin_client.set_user(emby_id, allow_playback=target_play):
-                    LOGGER.info(f"成功设置用户权限(go-emby): {emby_id} allow_playback={target_play}")
-                    return True
-                LOGGER.error(f"设置用户权限失败(go-emby): {emby_id}")
-                return False
 
             # 反查 bot 记录：本方法会整体重建策略，必须带上正确的码率，
             # 否则白名单用户/管理员被改媒体库权限后会被降回普通用户码率
@@ -883,18 +768,7 @@ class Embyservice(metaclass=Singleton):
         :param reason: 终止原因
         :return: 是否成功
         """
-        global _GO_EMBY_STOP_WARNED
         try:
-            # go-emby 未实现 /emby/Sessions/{id}/Playing/Stop 与 /Message（404），
-            # 直接跳过网络调用；返回 False 与现状一致（会话确实没有被终止），提示只打一次
-            if await _is_go_emby_server():
-                if not _GO_EMBY_STOP_WARNED:
-                    _GO_EMBY_STOP_WARNED = True
-                    LOGGER.warning(
-                        f"当前 Emby(go-emby) 未实现远程停止播放接口，终止会话请求已跳过: {session_id} - {reason}"
-                    )
-                return False
-
             LOGGER.info(f"开始终止会话: {session_id} - {reason}")
             
             # 停止播放
@@ -929,35 +803,6 @@ class Embyservice(metaclass=Singleton):
         :return: 是否成功
         """
         try:
-            # go-emby：Policy 接口丢弃请求体，封禁/解封改走自研 /admin/users
-            # （admin/allow_playback 语义与官方路径保持一致：disable=True -> 禁止播放）
-            if await _is_go_emby_server():
-                admin_client = _go_emby_admin_client()
-                if admin_client is None:
-                    LOGGER.error(f"go-emby 管理员凭据不可用，修改用户策略失败: {emby_id}")
-                    return False
-                target_play = (not disable)
-                state = await _go_emby_current_state(admin_client, emby_id)
-                if state is None:
-                    LOGGER.error(f"go-emby 找不到用户或读不到状态，修改用户策略失败: {emby_id}")
-                    return False
-                if (state[0] is not None and state[0] == bool(admin)
-                        and state[1] is not None and state[1] == target_play):
-                    # 幂等：admin 与播放权限都已是目标值就不要再 PUT。
-                    # 尤其重要——并发监控每个检测周期都会对超限用户调 disable=True，
-                    # 若每次都 PUT allow_playback=false，服务端会每轮 DELETE FROM plays
-                    # 反复清空该用户的播放记录/进度。
-                    # 只在"明确读到当前值且都相等"时跳过；字段缺失（None）照常下发。
-                    LOGGER.info(
-                        f"用户策略已是目标值，跳过(go-emby): {emby_id} admin={admin} allow_playback={target_play}"
-                    )
-                    return True
-                if await admin_client.set_user(emby_id, admin=admin, allow_playback=target_play):
-                    LOGGER.info(f"成功修改用户策略(go-emby): {emby_id} admin={admin} allow_playback={target_play}")
-                    return True
-                LOGGER.error(f"修改用户策略失败(go-emby): {emby_id}")
-                return False
-
             current_policy = {}
             user_result = await self._request('GET', f'/emby/Users/{emby_id}')
             if user_result.success:
@@ -1010,12 +855,6 @@ class Embyservice(metaclass=Singleton):
 
         :return: (成功数, 失败数)
         """
-        # go-emby 未实现 RemoteClientBitrateLimit（Policy 请求体被丢弃），播放限速在该服务端不可用：
-        # 直接短路返回，不去遍历用户做无效 POST（返回值保持 (0, 0)，调用方按 Tuple[int, int] 解包）
-        if await _is_go_emby_server():
-            LOGGER.warning("go-emby 未实现 RemoteClientBitrateLimit，播放限速在本服务端不可用，已跳过")
-            return 0, 0
-
         success_count = 0
         fail_count = 0
         skip_count = 0

@@ -147,8 +147,5 @@
   "concurrent_play_limit_whitelist": 4,
   "playback_rate_limit_enabled": false,
   "playback_rate_limit": 8,
-  "playback_rate_limit_whitelist": 20,
-  "emby_server_type": "auto",
-  "emby_admin_user": "",
-  "emby_admin_password": ""
+  "playback_rate_limit_whitelist": 20
 }

@@ -207,9 +207,8 @@ async def check_concurrent_play_limit():
         # 1b) **Emby 侧**管理员同样永久豁免（用户明确要求）。
         #     不能只依赖上面那条「查不到 bot 记录就跳过」——那只覆盖了没建档的管理员。
         #     若管理员同时在 bot 里建了档（如 lv='b'），超限就会走到下面的封禁；
-        #     而封禁在官方 Emby 与 go-emby 上**都会把 IsAdministrator 写成 false**
-        #     （create_policy(admin=False) / PUT /admin/users 的 Admin=false），
-        #     等于把管理员**永久降权**。go-emby 适配后该动作从「空转」变成「真的生效」。
+        #     而封禁会把 `IsAdministrator` 写成 false（create_policy(admin=False)），
+        #     等于把管理员**永久降权**。
         #     取不到身份（None）时**同样豁免**：宁可少限制一个用户一个周期，也不能
         #     误伤管理员；异常会打 WARNING，便于运维发现。
         emby_admin = await emby_mod.is_emby_admin(emby_user_id)
