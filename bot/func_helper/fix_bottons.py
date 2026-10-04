@@ -436,6 +436,10 @@ async def cr_kk_ikb(uid, first, warn_count=None):
     text = ''
     text1 = ''
     keyboard = []
+    # 「关闭/开启 额外媒体库」按钮是有条件显示的（extra_emby_libs 为空、或 Emby
+    # 查询失败时都不会出现）。警告按钮的排布要依赖这个事实，所以显式记一个标志，
+    # 而不是靠 len(keyboard) 反推 —— 后者在以后往 keyboard 里加按钮时会静默算错。
+    has_extralib = False
     data = await members_info(uid)
     if data is None:
         text += f'**· 🆔 TG** ：[{first}](tg://user?id={uid}) [`{uid}`]\n数据库中没有此ID。ta 还没有私聊过我'
@@ -476,6 +480,9 @@ async def cr_kk_ikb(uid, first, warn_count=None):
                         # 如果获取策略信息失败，默认显示为未启用状态
                         LOGGER.error(f"获取额外媒体库状态失败: {str(e)}")
                         keyboard.append([f'关闭额外媒体库', f'embyextralib_block-{uid}'])
+            # 走到这里 keyboard 末尾多出来的那个元素就是额外媒体库按钮（两条 append
+            # 路径都在上面这个 if 里）。用长度差判断，避免以后改按钮文案时漏改。
+            has_extralib = len(keyboard) > 2
             try:
                 rst = await emby.emby_cust_commit(emby_id=embyid, days=30)
                 last_time = rst[0][0]
@@ -507,13 +514,24 @@ async def cr_kk_ikb(uid, first, warn_count=None):
                 f"**· 🚨 到期时间** | **{ex}**\n" \
                 f"{warn_line}"
         text += text1
-        # 警告管理固定单独成行：不能参与上面的 array_chunk，
-        # 否则「额外媒体库」按钮在不在（条目奇偶）会把这一行拆散错位。
+        # 警告按钮不参与上面的 array_chunk：否则「额外媒体库」按钮在不在（条目奇偶）
+        # 会把它们拆散错位。排布规则：
+        #   「🔄 重置警告」与「关闭/开启 额外媒体库」**同一行** —— 两者都是
+        #   「把某个开关切到某个状态」的动作；「➕ 警告+1 / ➖ 警告-1」单独一行
+        #   —— 两者都是「在当前值上增减」的动作。分组因此是按语义而非按功能域。
+        #   额外媒体库按钮不存在时（extra_emby_libs 未配置、或 Emby 查询失败），
+        #   重置警告**单独占一行** —— 位置稳定，不因为一个按钮的消失而挤进警告行。
         lines = array_chunk(keyboard, 2)
         if name != '无账户信息':
-            lines.append([['➕ 警告+1', f'warn_plus-{uid}'],
-                          ['➖ 警告-1', f'warn_minus-{uid}'],
-                          ['🔄 重置警告', f'warn_reset-{uid}']])
+            warn_row = [['➕ 警告+1', f'warn_plus-{uid}'],
+                        ['➖ 警告-1', f'warn_minus-{uid}']]
+            reset_btn = ['🔄 重置警告', f'warn_reset-{uid}']
+            if has_extralib:
+                # lines[-1] 就是 array_chunk 留下的、只含额外媒体库按钮的那一行
+                lines[-1].append(reset_btn)
+            else:
+                lines.append([reset_btn])
+            lines.append(warn_row)
         lines.append([['🚫 踢出并封禁', f'fuckoff-{uid}'], ['❌ 删除消息', f'closeit']])
         keyboard = ikb(lines)
     return text, keyboard

@@ -338,21 +338,32 @@ check("有「🔄 重置警告」按钮", any("重置警告" in l for l in label
 check("回调数据 warn_minus-<tgid>", f"warn_minus-5608153118" in datas, str(datas))
 check("回调数据 warn_reset-<tgid>", f"warn_reset-5608153118" in datas, str(datas))
 
-# 警告按钮必须自己占一行（不受「额外媒体库」是否存在影响）
-warn_rows = [i for i, row in enumerate(kb) if any("warn_minus-" in b[1] for b in row)]
-check("警告按钮独占一行", len(warn_rows) == 1, f"出现在行 {warn_rows}")
-if warn_rows:
-    row = kb[warn_rows[0]]
-    check("该行同时含 +1 / -1 / 重置 三个按钮",
-          len(row) == 3 and row[0][1].startswith("warn_plus-")
-          and row[1][1].startswith("warn_minus-") and row[2][1].startswith("warn_reset-"),
-          str(row))
+# 布局：+1/-1 同一行；重置警告与「关闭/开启 额外媒体库」同行，
+# 没有额外媒体库按钮时单独占一行（位置稳定，不挤进警告行）。
+def _rows_with(kb_, needle):
+    return [i for i, row in enumerate(kb_) if any(needle in b[1] for b in row)]
+
+
+pm_rows = _rows_with(kb, "warn_minus-")
+res_rows = _rows_with(kb, "warn_reset-")
+check("+1/-1 独占一行且不与重置警告同行",
+      len(pm_rows) == 1 and len(kb[pm_rows[0]]) == 2, f"出现在行 {pm_rows}")
+if pm_rows:
+    row = kb[pm_rows[0]]
+    check("该行是 +1 / -1 两个按钮",
+          row[0][1].startswith("warn_plus-") and row[1][1].startswith("warn_minus-"), str(row))
+check("无额外媒体库时，重置警告单独占一行",
+      len(res_rows) == 1 and len(kb[res_rows[0]]) == 1,
+      f"重置={res_rows} 行={kb[res_rows[0]] if res_rows else None}")
 check("最后一行是「踢出并封禁 / 删除消息」",
       "fuckoff-" in kb[-1][0][1] and kb[-1][1][1] == "closeit", str(kb[-1]))
 
 text_l, kb_l = render_panel(libs=["额外库A"])
-warn_rows_l = [i for i, row in enumerate(kb_l) if any("warn_minus-" in b[1] for b in row)]
-check("有额外媒体库时，警告按钮仍独占一行", len(warn_rows_l) == 1, f"出现在行 {warn_rows_l}")
+ext_rows_l = _rows_with(kb_l, "embyextralib_")
+res_rows_l = _rows_with(kb_l, "warn_reset-")
+check("有额外媒体库时，重置警告与额外媒体库同一行",
+      len(ext_rows_l) == 1 and ext_rows_l == res_rows_l,
+      f"额外库={ext_rows_l} 重置={res_rows_l}")
 check("有额外媒体库时，最后一行仍是踢出/删除消息",
       "fuckoff-" in kb_l[-1][0][1], str(kb_l[-1]))
 

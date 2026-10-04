@@ -249,7 +249,7 @@ def run(coro):
 
 
 # ══════════════════════════════════════════════════════════════════
-print("════════ 1. cr_kk_ikb：警告行出现 ➕ 且三个按钮同一行 ════════")
+print("════════ 1. cr_kk_ikb 布局：重置警告并入「额外媒体库」行，+1/-1 单独一行 ════════")
 
 ns2 = {}
 fb2 = extract(f"{REPO}/bot/func_helper/fix_bottons.py", {"_warn_count_of", "cr_kk_ikb"})
@@ -290,8 +290,19 @@ def render_panel(warn=2, libs=None, account=True):
     return run(ns2["cr_kk_ikb"](5608153118, "测试用户"))
 
 
-text, kb = render_panel()
-flat = [b for row in kb for b in row]
+text, kb = render_panel(libs=["额外库A"])   # 有「额外媒体库」按钮
+text_no, kb_no = render_panel(libs=[])      # 无「额外媒体库」按钮
+
+
+def flat_of(kb_):
+    return [b for row in kb_ for b in row]
+
+
+def rows_with(kb_, needle):
+    return [i for i, row in enumerate(kb_) if any(needle in b[1] for b in row)]
+
+
+flat = flat_of(kb)
 labels = [b[0] for b in flat]
 datas = [b[1] for b in flat]
 
@@ -300,38 +311,55 @@ check("回调数据 warn_plus-<tgid>", "warn_plus-5608153118" in datas, str(data
 check("原有的 -1 / 重置 按钮都还在",
       "warn_minus-5608153118" in datas and "warn_reset-5608153118" in datas, str(datas))
 
-# 警告按钮必须自己占一行（不受「额外媒体库」是否存在影响）
-warn_rows = [i for i, row in enumerate(kb) if any("warn_plus-" in b[1] for b in row)]
-check("警告按钮独占一行", len(warn_rows) == 1, f"出现在行 {warn_rows}")
-if warn_rows:
-    row = kb[warn_rows[0]]
-    check("该行同时含 +1 / -1 / 重置 三个按钮",
-          len(row) == 3 and row[0][1] == "warn_plus-5608153118"
-          and row[1][1] == "warn_minus-5608153118" and row[2][1] == "warn_reset-5608153118",
-          str(row))
-    check("顺序为 ➕ / ➖ / 🔄",
-          row[0][0].startswith("➕") and row[1][0].startswith("➖") and row[2][0].startswith("🔄"),
-          str([b[0] for b in row]))
+# ── 布局（有额外媒体库）：重置警告与「关闭/开启 额外媒体库」同一行，+1/-1 单独一行 ──
+ext_l = rows_with(kb, "embyextralib_")
+res_l = rows_with(kb, "warn_reset-")
+pm_l = rows_with(kb, "warn_plus-")
+print(f"  有额外媒体库：额外库行={ext_l} 重置行={res_l} +1/-1 行={pm_l}")
+check("有额外媒体库时，重置警告与额外媒体库同一行",
+      len(ext_l) == 1 and ext_l == res_l, f"额外库={ext_l} 重置={res_l}")
+check("该行顺序为 [额外媒体库, 重置警告]",
+      len(res_l) == 1 and [b[1] for b in kb[res_l[0]]] ==
+      ["embyextralib_block-5608153118", "warn_reset-5608153118"],
+      str(kb[res_l[0]] if res_l else None))
+check("有额外媒体库时，+1/-1 单独一行且不含重置",
+      len(pm_l) == 1 and [b[1] for b in kb[pm_l[0]]] ==
+      ["warn_plus-5608153118", "warn_minus-5608153118"],
+      str(kb[pm_l[0]] if pm_l else None))
+check("+1/-1 行的顺序为 ➕ / ➖",
+      len(pm_l) == 1 and kb[pm_l[0]][0][0].startswith("➕")
+      and kb[pm_l[0]][1][0].startswith("➖"),
+      str([b[0] for b in kb[pm_l[0]]] if pm_l else None))
 
-# 关键：警告行不能参与 array_chunk —— 上面「额外媒体库」按钮在不在会改变条目奇偶。
-# 有额外库（条目变奇数）时，警告行仍必须完整地独占一行、不被拆散。
-text_l, kb_l = render_panel(libs=["额外库A"])
-warn_rows_l = [i for i, row in enumerate(kb_l) if any("warn_plus-" in b[1] for b in row)]
-check("有额外媒体库时，警告按钮仍独占一行", len(warn_rows_l) == 1, f"出现在行 {warn_rows_l}")
-if warn_rows_l:
-    check("有额外媒体库时，警告行仍是完整的 3 个按钮",
-          len(kb_l[warn_rows_l[0]]) == 3, str(kb_l[warn_rows_l[0]]))
-check("有/无额外媒体库，警告行相对位置一致（都在倒数第二行）",
-      warn_rows == [len(kb) - 2] and warn_rows_l == [len(kb_l) - 2],
-      f"无库={warn_rows}/{len(kb)} 有库={warn_rows_l}/{len(kb_l)}")
+# ── 布局（无额外媒体库）：重置警告单独占一行，位置稳定，不挤进警告行 ──
+ext_n = rows_with(kb_no, "embyextralib_")
+res_n = rows_with(kb_no, "warn_reset-")
+pm_n = rows_with(kb_no, "warn_plus-")
+print(f"  无额外媒体库：额外库行={ext_n} 重置行={res_n} +1/-1 行={pm_n}")
+check("无额外媒体库时确实没有额外媒体库按钮", ext_n == [], str(ext_n))
+check("无额外媒体库时，重置警告单独占一行",
+      len(res_n) == 1 and len(kb_no[res_n[0]]) == 1,
+      f"重置={res_n} 行={kb_no[res_n[0]] if res_n else None}")
+check("无额外媒体库时，重置警告不与 +1/-1 同行", res_n != pm_n, f"重置={res_n} +1={pm_n}")
+check("无额外媒体库时，+1/-1 仍是同一行",
+      len(pm_n) == 1 and [b[1] for b in kb_no[pm_n[0]]] ==
+      ["warn_plus-5608153118", "warn_minus-5608153118"],
+      str(kb_no[pm_n[0]] if pm_n else None))
+check("两种布局下重置警告都恰好出现一次（既不重复也不消失）",
+      len(res_l) == 1 and len(res_n) == 1, f"有库={res_l} 无库={res_n}")
 
 # 静态确认：警告行是在 array_chunk 之后 append 的，不可能被分块
 _src_fb = open(f"{REPO}/bot/func_helper/fix_bottons.py", encoding="utf-8").read()
 check("静态：警告行 append 发生在 array_chunk 之后（不参与分块）",
       _src_fb.index("lines = array_chunk(keyboard, 2)")
       < _src_fb.index("['➕ 警告+1'"))
-check("静态：保留了「不能参与 array_chunk」的注释说明",
-      "不能参与上面的 array_chunk" in _src_fb)
+check("静态：保留了「不参与 array_chunk」的注释说明",
+      "不参与上面的 array_chunk" in _src_fb)
+check("静态：重置警告的两种落位都由 has_extralib 决定",
+      "if has_extralib:" in _src_fb and "lines.append([reset_btn])" in _src_fb,
+      "缺少 has_extralib 分支")
+check("静态：has_extralib 由长度差判断（不硬编码按钮下标）",
+      "has_extralib = len(keyboard) > 2" in _src_fb)
 
 # 约束 5：无 Emby 账户不显示警告行与按钮
 text_n, kb_n = render_panel(account=False)
