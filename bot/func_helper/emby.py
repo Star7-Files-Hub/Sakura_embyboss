@@ -4,6 +4,7 @@
 emby的api操作方法 - 使用aiohttp重构版本
 """
 import asyncio
+import os
 import random
 import re
 import urllib.parse
@@ -106,6 +107,64 @@ def pwd_policy(embyid: str, stats: bool = False, new: str = None) -> Dict[str, A
             "NewPw": str(new),
         }
     return policy
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# 会话轮询窗口（2026-10-xx 瘦身）
+# ──────────────────────────────────────────────────────────────────────────────
+
+# `GET /emby/Sessions` 裸调实测：**2,970,545 B / 4037 条 session / 7.70s**，其中真正
+# 有 `NowPlayingItem` 的只有 7~8 条（4000 多条是永不清理的僵尸会话，只在进程内存里）。
+# 加 `?ActiveWithinSeconds=300` 后实测 89,940 B / 75 条 / **0.66s** —— 体积 1/33、耗时
+# 1/12，且**语义等价**：本文件以及所有调用方（server_panel / watching /
+# concurrent_play_monitor / line_report）拿到列表后都只统计/挑选 `NowPlayingItem`
+# 非空的会话，僵尸会话本来就被丢弃。
+#
+# 权威实现是 `register_throttle.sessions_endpoint()`（全仓库 4 处会话调用点统一走它，
+# 窗口可用 `register_session_active_seconds` 配置，0 = 退回裸端点），本文件优先调用它；
+# 下面的常量/函数**只在限流模块不可用时兜底**，默认 300。纯优化参数，任何异常都回落，
+# 绝不因为它打断巡检。
+SESSIONS_ACTIVE_WITHIN_SECONDS_DEFAULT = 300
+
+# 兜底时读取窗口的配置名/环境变量名：与 register_throttle 的键名保持一致，
+# 免得同一个参数在两处要用两种写法。
+_SESSIONS_WINDOW_ATTRS = ("register_session_active_seconds", "session_active_seconds",
+                          "sessions_active_within_seconds")
+_SESSIONS_WINDOW_ENVS = ("EMBY_THROTTLE_SESSION_ACTIVE_SECONDS",
+                         "SAKURA_SESSIONS_ACTIVE_WITHIN_SECONDS")
+
+
+def _sessions_active_within_seconds() -> int:
+    """
+    **兜底用**：取会话轮询的活动窗口（秒）。优先级：环境变量 > `_open` > 默认 300。
+
+    返回 0 表示显式要求"不加参数"。任何异常/非法值都回落到默认值。
+    """
+    for env_key in _SESSIONS_WINDOW_ENVS:
+        raw = os.environ.get(env_key)
+        if raw:
+            try:
+                return int(float(raw))
+            except (TypeError, ValueError):
+                break
+    try:
+        from bot import _open as _open_obj
+        for attr in _SESSIONS_WINDOW_ATTRS:
+            if hasattr(_open_obj, attr):
+                return int(getattr(_open_obj, attr))
+    except Exception:
+        pass
+    return SESSIONS_ACTIVE_WITHIN_SECONDS_DEFAULT
+
+
+def _fallback_sessions_endpoint() -> str:
+    """
+    **兜底用**：`register_throttle.sessions_endpoint()` 不可用时的等价实现。
+    """
+    seconds = _sessions_active_within_seconds()
+    if seconds <= 0:
+        return '/emby/Sessions'
+    return f'/emby/Sessions?ActiveWithinSeconds={seconds}'
 
 
 class EmbyApiResult:
@@ -301,16 +360,132 @@ class Embyservice(metaclass=Singleton):
         except Exception as e:
             LOGGER.error(f"回滚删除账号异常: {name} (ID: {user_id}) - {str(e)}")
 
+    # ── 建号快路径（7 次 HTTP → 3 次）────────────────────────────────────────
+
+    @staticmethod
+    def _load_throttle_fast_path():
+        """
+        惰性取 `register_throttle` 模块（建号快路径要复用它已有的 TTL 缓存/单飞）。
+
+        为什么要惰性 import：`register_throttle.install()` 会替换
+        `Embyservice._request`，而它内部又 `from bot.func_helper.emby import ...`，
+        顶层 import 会构成循环导入。这里在函数内 import 并 try/except 兜底。
+
+        **返回 None 表示"快路径不可用"**（模块没装/导入报错/缺少所需函数），
+        调用方必须回退原来的多请求路径 —— 建号绝不能因为限流模块而失败。
+        """
+        try:
+            from bot.func_helper import register_throttle
+        except Exception as e:
+            LOGGER.debug(f"register_throttle 不可用，建号走原多请求路径: {type(e).__name__}: {e}")
+            return None
+        if not hasattr(register_throttle, "cached_virtual_folders"):
+            LOGGER.debug("register_throttle 缺少 cached_virtual_folders，建号走原多请求路径")
+            return None
+        return register_throttle
+
+    @staticmethod
+    async def _fetch_cached_folder_ids(throttle) -> Optional[Dict[str, str]]:
+        """
+        取媒体库映射 `{guid: name}`（走 register_throttle 的 TTL 缓存 + 单飞），
+        替代原来每个账号都发一次的 `GET /emby/Library/VirtualFolders`。
+
+        **返回 None 一律表示"快路径不可用，必须整条回退原逻辑"**，共两种情况：
+
+        1. 缓存函数抛异常（限流模块自己坏了）；
+        2. **媒体库列表为空** —— 这是最关键的安全边界：如果在这种情况下照常算策略，
+           就会写出 `EnableAllFolders=False` + `EnabledFolders=[]`，而 Emby 里
+           `EnabledFolders=[]` 表示"可见的库一个都没有"（不是"全部库"），用户会被
+           **彻底锁死**：新建账号打开就是空库，且没有任何报错。所以列表为空时宁可
+           回退到原来的「先写 create_policy（EnableAllFolders 保持 Emby 默认 true）
+           再由 hide_folders_by_names 处理」路径，也绝不写空 EnabledFolders。
+        """
+        try:
+            libs = await throttle.cached_virtual_folders()
+        except Exception as e:
+            LOGGER.warning(f"cached_virtual_folders 异常，建号回退原多请求路径: {type(e).__name__}: {e}")
+            return None
+        if not isinstance(libs, dict) or not libs:
+            LOGGER.warning("媒体库列表为空，建号回退原多请求路径（拒绝写出锁死用户的空 EnabledFolders）")
+            return None
+        return libs
+
+    @staticmethod
+    def _build_full_policy(libs: Dict[str, str]) -> Dict[str, Any]:
+        """
+        一次算全的建号策略，**逐字等价**于原来「写两次策略」的最终生效值。
+
+        原路径有两个分支，必须都复刻（这是"等价"的依据，不是拍脑袋）：
+
+        第 3 步恒为 `create_policy(False, False)`：
+            `BlockedMediaFolders = ['播放列表'] + extra_emby_libs`，
+            且**不带** `EnableAllFolders` / `EnabledFolders` —— Emby 的 UserPolicy
+            这两个字段保持原值（新账号默认 `true` / 空），即"全部库可见"。
+
+        第 4 步 `hide_folders_by_names(emby_block + extra_emby_libs)`：
+
+        分支甲 —— **两个名字在 Emby 里都找不到**（`get_folder_ids_by_names()` 返回空）：
+            `hide_folders_by_names()` 直接 `return True`，**什么都不写**。
+            最终状态 = 只有第 3 步那次 Policy：`EnableAllFolders` 仍是 `true`。
+            ⚠️ 线上就是这一支：`emby_block=['nsfw']`、`extra_emby_libs=['电视']`，
+               而真实库名是 '⚔️国产·动漫' / '📺日韩·剧集' 等，一个都对不上。
+            所以这里**绝不能**顺手改成 `EnableAllFolders=False` + 显式 EnabledFolders ——
+            那样虽然"今天看得见的库一样多"，但**以后新加的媒体库对这些用户不会自动可见**，
+            是与现状不同的行为（需要靠 `/embylibs_all` 之类的手动同步补救）。
+
+        分支乙 —— 名字能对上：
+            `new_enabled = 当前启用(此时=全部库) − 被隐藏`、
+            `new_blocked = dedup(第3步名单 ∪ emby_block ∪ extra_emby_libs)`、
+            `EnableAllFolders=False`。
+
+        :param libs: `{guid: name}`，必须是**非空**（空的情况见 `_fetch_cached_folder_ids`）
+        """
+        policy = create_policy(False, False)
+
+        # 第 4 步真正要隐藏的名字（顺序与 hide_folders_by_names 的入参一致）
+        hide_names = list(dict.fromkeys(list(emby_block or []) + list(extra_emby_libs or [])))
+        hide_ids = {guid for guid, lib_name in libs.items() if lib_name in hide_names}
+
+        if not hide_ids:
+            # 分支甲：与 `hide_folders_by_names()` 提前 return True 逐字等价。
+            # 只写第 3 步的策略，不碰 EnableAllFolders / EnabledFolders。
+            return policy
+
+        # 分支乙：一次写全，等价于"第3步 + 第4步"的最终值
+        blocked_names = list(dict.fromkeys(
+            ['播放列表'] + list(extra_emby_libs or []) + list(emby_block or [])
+        ))
+        policy.update({
+            'BlockedMediaFolders': blocked_names,
+            'EnableAllFolders': False,
+            'EnabledFolders': [guid for guid in libs if guid not in hide_ids],
+        })
+        return policy
+
     async def emby_create(self, name: str, days: int) -> Union[Tuple[str, str, datetime], bool]:
         """
         创建 Emby 账户
         :param name: 用户名
         :param days: 有效天数
         :return: (用户ID, 密码, 过期时间) 或 False
+
+        ── 请求数（2026-10-xx 瘦身）──
+        快路径 **3 次 HTTP**，其中 Policy 只写一次、媒体库列表走 TTL 缓存：
+            POST /Users/New → POST /Users/{id}/Password → POST /Users/{id}/Policy(一次写全)
+        原路径 7 次：
+            POST /Users/New → POST Password → POST Policy
+            → GET /Users/{id} → GET /Library/VirtualFolders → GET /Users/{id} → POST Policy
+
+        只要 `register_throttle.cached_virtual_folders()` 拿不到（未挂载/抛异常）或
+        媒体库列表为空，就**整条回退**到原路径：返回值、日志、失败时的
+        `_delete_orphan_account` 回滚语义都与改造前完全一致。
         """
         try:
             expiry_date = datetime.now() + timedelta(days=days)
-            
+
+            # 快路径可用性在**建号之前**判定：拿不到就从头走原路径，避免白建一个号再回滚。
+            throttle = self._load_throttle_fast_path()
+
             # 1. 创建用户
             LOGGER.info(f"开始创建用户: {name}")
             result = await self._request('POST', '/emby/Users/New', json={"Name": name})
@@ -323,6 +498,7 @@ class Embyservice(metaclass=Singleton):
                 LOGGER.error("无法获取用户ID")
                 return False
             
+            fast_policy_written = False
             # B-H1：建号之后的步骤失败必须删除已建账号，避免留下占用用户名的孤儿账号
             try:
                 # 2. 设置密码
@@ -335,27 +511,37 @@ class Embyservice(metaclass=Singleton):
                     return False
                 
                 # 3. 设置策略
-                policy = create_policy(False, False)
+                # 快路径：媒体库列表走缓存，BlockedMediaFolders/EnableAllFolders/
+                # EnabledFolders 一次写全（等价于原「写两次策略」的最终值）。
+                # 拿不到媒体库列表（含"列表为空"）→ 退回原策略对象，第 4 步再补。
+                libs = await self._fetch_cached_folder_ids(throttle) if throttle is not None else None
+                policy = self._build_full_policy(libs) if libs is not None else create_policy(False, False)
                 result = await self._request('POST', f'/emby/Users/{user_id}/Policy', json=policy)
                 if not result.success:
                     LOGGER.error(f"设置策略失败: {result.error}")
                     await self._delete_orphan_account(user_id, name)
                     return False
+                fast_policy_written = libs is not None
             except Exception as e:
                 LOGGER.error(f"创建用户后续步骤异常: {name} (ID: {user_id}) - {str(e)}")
                 await self._delete_orphan_account(user_id, name)
                 return False
 
             # 4. 隐藏 emby_block 和 extra_emby_libs 媒体库
-            try:
-                # 使用封装的隐藏方法
-                block_libs = emby_block + extra_emby_libs
-                result = await self.hide_folders_by_names(user_id, block_libs)
-                if not result:
-                    LOGGER.warning(f"设置媒体库权限失败: {user_id}，但用户已创建成功")
-            except Exception as e:
-                # 如果设置媒体库权限失败，记录错误但不影响用户创建
-                LOGGER.error(f"设置媒体库权限异常: {name} (ID: {user_id}) - {str(e)}")
+            if fast_policy_written:
+                # 快路径已在第 3 步一次写全（策略只写了这一次），不再走
+                # hide_folders_by_names 的「GET /Users/{id} + GET /VirtualFolders + 再写一次 Policy」。
+                LOGGER.debug(f"快路径已一次写全媒体库策略，跳过 hide_folders_by_names: {user_id}")
+            else:
+                try:
+                    # 使用封装的隐藏方法
+                    block_libs = emby_block + extra_emby_libs
+                    result = await self.hide_folders_by_names(user_id, block_libs)
+                    if not result:
+                        LOGGER.warning(f"设置媒体库权限失败: {user_id}，但用户已创建成功")
+                except Exception as e:
+                    # 如果设置媒体库权限失败，记录错误但不影响用户创建
+                    LOGGER.error(f"设置媒体库权限异常: {name} (ID: {user_id}) - {str(e)}")
             
             LOGGER.info(f"成功创建用户: {name} (ID: {user_id})")
             return user_id, password, expiry_date
@@ -500,22 +686,32 @@ class Embyservice(metaclass=Singleton):
             return []
 
     async def update_user_enabled_folder(self, emby_id: str, enabled_folder_ids: List[str] = None, blocked_media_folders: List[str] = None, 
-                                enable_all_folders: bool = True) -> bool:
+                                enable_all_folders: bool = True, current_policy: Optional[Dict[str, Any]] = None) -> bool:
         """
         更新用户策略 - 新版本API方法
         :param emby_id: 用户ID
         :param enabled_folder_ids: 启用的文件夹ID列表
+        :param blocked_media_folders: 阻止的媒体库名称列表
         :param enable_all_folders: 是否启用所有文件夹
+        :param current_policy: 调用方**已经读到**的当前用户策略（可选）。
+            传入时不再单独 `GET /Users/{id}` 去读一次（去掉同一账号内的重复读）；
+            为 None（默认）时保持原行为，自己读一次。
+            加这个参数**有且只有一个目的**就是去重复读，所以现有调用点一律不用改，
+            行为逐字不变。
         :return: 是否成功
         """
         try:
-            # 首先获取当前用户策略
-            user_result = await self._request('GET', f'/emby/Users/{emby_id}')
-            if not user_result.success:
-                LOGGER.error(f"获取用户信息失败: {emby_id} - {user_result.error}")
-                return False
-            
-            current_policy = user_result.data.get('Policy', {})
+            if current_policy is not None:
+                # 调用方已提供策略：直接用，省掉一次 GET /emby/Users/{id}
+                current_policy = current_policy if isinstance(current_policy, dict) else {}
+            else:
+                # 首先获取当前用户策略
+                user_result = await self._request('GET', f'/emby/Users/{emby_id}')
+                if not user_result.success:
+                    LOGGER.error(f"获取用户信息失败: {emby_id} - {user_result.error}")
+                    return False
+                
+                current_policy = user_result.data.get('Policy', {})
             
             # 更新策略中的文件夹访问设置
             updated_policy = current_policy.copy()
@@ -686,7 +882,20 @@ class Embyservice(metaclass=Singleton):
         :return: 播放用户数量
         """
         try:
-            result = await self._request('GET', '/emby/Sessions')
+            # 会话端点统一走 register_throttle.sessions_endpoint()（concurrent_play_monitor
+            # / watching 等其它 3 处会话调用点同源，窗口用 register_session_active_seconds
+            # 配，0 = 退回裸端点）。裸调实测 2,970,545 B / 4037 条 / 7.70s，带
+            # `?ActiveWithinSeconds=300` 后 89,940 B / 75 条 / 0.66s；下面本来就只统计
+            # NowPlayingItem 非空的会话，僵尸会话纯属白流量，语义等价。
+            # 限流模块缺失/导入失败时退化成硬编码端点（`_fallback_sessions_endpoint`），
+            # 绝不因为一个优化参数把在线人数统计打断。
+            try:
+                from bot.func_helper.register_throttle import sessions_endpoint
+                endpoint = sessions_endpoint()
+            except Exception as e:
+                LOGGER.debug(f"sessions_endpoint 不可用，使用兜底端点: {type(e).__name__}: {e}")
+                endpoint = _fallback_sessions_endpoint()
+            result = await self._request('GET', endpoint)
             if result.success and result.data:
                 count = 0
                 for session in result.data:
@@ -703,35 +912,129 @@ class Embyservice(metaclass=Singleton):
 
     async def terminate_session(self, session_id: str, reason: str = "Unauthorized client detected") -> bool:
         """
-        终止指定的播放会话
+        向指定会话**下发**停止播放指令。
+
+        ⚠️ 返回值的语义是「服务端是否**受理**了这条指令」，**不是**「客户端已经断流」。
+        调用方不得把它当作「已终止」对外播报，详见下面 2026-10-06 的实测说明。
+
         :param session_id: 会话ID
         :param reason: 终止原因
-        :return: 是否成功
+        :return: 服务端是否受理了停止指令（不代表客户端已停止播放）
+
+        ── 2026-10-06 在 ChaPanda（Emby 4.10.0.40）上的实测结论 ──
+        `POST /Sessions/{Id}/Playing/Stop` 本质是**通过会话的远程控制通道向客户端
+        下发一条 playstate 指令**，不是服务端杀流。Emby 官方文档写明这类命令
+        "just assumed supported if SupportsRemoteControl is true"。而该服务器
+        3643 个会话里 `SupportsRemoteControl=True` 的 **0 个**；更硬的证据是
+        `GET /Sessions?ControllableByUserId=<userId>` 对**管理员自己**也返回 0 条，
+        即服务器自己就认为这些会话不可控。
+
+        实测：对正在播放的会话调用本接口，HTTP **204**，但 +5s/+15s/+30s 复查
+        `NowPlayingItem` **仍在播放**；`Playing/Pause` 同样无效。
+
+        所以在本服务器的客户端群体下，本接口**必然无效**。它保留的价值是：
+        对将来某个真正支持远程控制的客户端仍然有效，且调用它没有副作用。
+        真正能停流的手段见 `set_user_disabled()`。
         """
         try:
-            LOGGER.info(f"开始终止会话: {session_id} - {reason}")
-            
+            LOGGER.info(f"下发停止指令: {session_id} - {reason}")
+
             # 停止播放
             stop_result = await self._request('POST', f'/emby/Sessions/{session_id}/Playing/Stop')
-            
-            # 发送消息给客户端
+
+            # 发送消息给客户端（纯提示，不具备停流能力）
             message_data = {
-                "Text": f"🚫 会话已被终止: {reason}",
+                "Text": f"🚫 服务端已要求本会话停止播放: {reason}",
                 "Header": "安全警告",
                 "TimeoutMs": 10000
             }
-            message_result = await self._request('POST', f'/emby/Sessions/{session_id}/Message', json=message_data)
-            
-            # 只要有一个操作成功就认为成功
-            if stop_result.success or message_result.success:
-                LOGGER.info(f"成功终止会话: {session_id}")
+            await self._request('POST', f'/emby/Sessions/{session_id}/Message', json=message_data)
+
+            # 判据只看 Stop 是否被受理：Message 只是弹窗，成功了也不代表流会停。
+            # （旧实现写的是 `stop_result.success or message_result.success`，
+            #   只要弹窗发出去就对外宣称"已终止"，是纯粹的谎报。）
+            if stop_result.success:
+                LOGGER.info(f"停止指令已被服务端受理（不代表客户端已断流）: {session_id}")
                 return True
-            else:
-                LOGGER.error(f"终止会话失败: {session_id}")
-                return False
-                
+
+            LOGGER.error(f"停止指令被服务端拒绝: {session_id} - {stop_result.error}")
+            return False
+
         except Exception as e:
-            LOGGER.error(f"终止会话异常: {session_id} - {str(e)}")
+            LOGGER.error(f"下发停止指令异常: {session_id} - {str(e)}")
+            return False
+
+    async def get_user(self, emby_id: str) -> Optional[dict]:
+        """
+        读取单个 Emby 用户的完整对象（含 `Policy`）。
+
+        :param emby_id: Emby 用户ID
+        :return: 用户 dict；失败返回 None
+        """
+        try:
+            result = await self._request('GET', f'/emby/Users/{emby_id}')
+            if result.success and isinstance(result.data, dict):
+                return result.data
+            LOGGER.warning(f"读取 Emby 用户失败: {emby_id} - {getattr(result, 'error', None)}")
+            return None
+        except Exception as e:
+            LOGGER.error(f"读取 Emby 用户异常: {emby_id} - {type(e).__name__}: {e}")
+            return None
+
+    async def is_user_disabled(self, emby_id: str) -> Optional[bool]:
+        """
+        读取用户当前是否被禁用。
+
+        :return: True/False；**读不到时返回 None**（调用方必须区分「未禁用」与
+                 「查不到」，不能把查不到当成已还原 —— 那正是"永久封禁"的成因）
+        """
+        user = await self.get_user(emby_id)
+        if not user:
+            return None
+        policy = user.get("Policy") or {}
+        return bool(policy.get("IsDisabled", False))
+
+    async def set_user_disabled(self, emby_id: str, disabled: bool) -> bool:
+        """
+        **最小化**地翻转用户的 `IsDisabled`，其余策略字段原样保留。
+
+        与 `emby_change_policy()` 的区别（这个区别很重要）：
+        `emby_change_policy()` 用 `create_policy()` **整份覆盖**策略，只保留
+        `EnableAllFolders` / `EnabledFolders` / `BlockedMediaFolders` 三个字段，
+        其余（如 `SimultaneousStreamLimit`、`EnableRemoteControlOfOtherUsers`、
+        码率限制等）都会被重置成 `create_policy()` 的默认值。
+        用它做「临时踢流再还原」会把管理员的个性化设置一并抹掉，所以这里改成
+        读→改一个字段→写回。
+
+        :param emby_id: Emby 用户ID
+        :param disabled: 目标状态
+        :return: 是否写入成功（读不到原策略时**拒绝写入**，避免用不完整策略覆盖）
+        """
+        try:
+            user = await self.get_user(emby_id)
+            if not user:
+                LOGGER.error(f"无法读取用户策略，拒绝写入 IsDisabled={disabled}: {emby_id}")
+                return False
+
+            policy = user.get("Policy")
+            if not isinstance(policy, dict) or not policy:
+                LOGGER.error(f"用户策略为空，拒绝写入 IsDisabled={disabled}: {emby_id}")
+                return False
+
+            if bool(policy.get("IsDisabled", False)) == bool(disabled):
+                LOGGER.info(f"用户 IsDisabled 已是 {disabled}，无需写入: {emby_id}")
+                return True
+
+            policy["IsDisabled"] = bool(disabled)
+            result = await self._request('POST', f'/emby/Users/{emby_id}/Policy', json=policy)
+            if result.success:
+                LOGGER.info(f"已写入 IsDisabled={disabled}: {emby_id}")
+                return True
+
+            LOGGER.error(f"写入 IsDisabled={disabled} 失败: {emby_id} - {result.error}")
+            return False
+        except Exception as e:
+            LOGGER.error(f"写入 IsDisabled 异常: {emby_id} - {type(e).__name__}: {e}")
             return False
 
     async def emby_change_policy(self, emby_id: str, admin: bool = False, disable: bool = False) -> bool:
@@ -760,6 +1063,22 @@ class Embyservice(metaclass=Singleton):
 
             result = await self._request('POST', f'/emby/Users/{emby_id}/Policy', json=policy)
             if result.success:
+                # 【接管声明】任何一次显式的策略写入都意味着"这个用户的禁用状态
+                # 由本次调用负责"，所以必须作废可能还挂着的「临时封禁踢流」标记。
+                #
+                # 为什么放在这里、而不是逐个调用点：全仓库有 15+ 处会把用户置为禁用
+                # （/kk 面板、renew、syncs、create、userplays_rank、check_ex、
+                # user_info、ban_playlist、client_filter、line_report …）。逐个加清理
+                # 必然漏掉某个，而漏掉的后果是：管理员刚封的人，几十秒后被临时踢流的
+                # 还原任务**悄悄解开**。这里是所有这些路径的唯一收口点。
+                #
+                # disable=False（解封）与 admin=True（提权，内部同样写 IsDisabled=False）
+                # 也要清：管理员的手动操作永远优先于机器人的临时措施。
+                #
+                # 注意 `set_user_disabled()` **不**走这里 —— 它必须能改写 IsDisabled
+                # 而不清掉自己刚落的标记，否则「临时封禁踢流」当场就自我作废了。
+                if sql_update_emby(Emby.embyid == emby_id, kick_until=None):
+                    LOGGER.debug(f"已清除该用户的临时封禁踢流标记: {emby_id}")
                 LOGGER.info(f"成功修改用户策略: {emby_id}")
                 return True
             else:

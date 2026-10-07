@@ -1,4 +1,5 @@
 import asyncio
+import time
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Optional
@@ -11,6 +12,53 @@ from bot.func_helper.msg_utils import editMessage, sendMessage
 from bot.func_helper.utils import tem_adduser
 from bot.sql_helper.sql_emby import sql_get_emby, sql_update_emby, Emby
 
+# ── 排队体验参数 ────────────────────────────────────────────────────────────
+# 全部通过 getattr(_open, ...) 读取：schemas 里没有这些字段时用默认值，不会报错。
+ETA_WINDOW_DEFAULT = 10          # 滑动平均窗口：最近 N 个已完成 job
+ETA_MIN_SAMPLES_DEFAULT = 3      # 少于该样本数时只给粗略区间
+WARN_AFTER_SECONDS_DEFAULT = 120  # 等待超过该秒数补一条"仍在排队"提示
+WARN_REPEAT_MAX = 3               # 同一用户最多补几条排队提示（防止刷 Telegram 编辑配额）
+
+
+def _eta_window() -> int:
+    return max(1, int(getattr(_open, "register_queue_eta_window", ETA_WINDOW_DEFAULT) or ETA_WINDOW_DEFAULT))
+
+
+def _eta_min_samples() -> int:
+    return max(1, int(getattr(_open, "register_queue_eta_min_samples", ETA_MIN_SAMPLES_DEFAULT) or ETA_MIN_SAMPLES_DEFAULT))
+
+
+def _warn_after_seconds() -> int:
+    return max(0, int(getattr(_open, "register_queue_warn_after_seconds", WARN_AFTER_SECONDS_DEFAULT) or 0))
+
+
+def format_duration(seconds: float) -> str:
+    """秒数 → 用户能读的中文时长（不暴露内部实现）。"""
+    total = max(0, int(round(float(seconds))))
+    if total < 60:
+        return f"{total} 秒"
+    minutes, sec = divmod(total, 60)
+    if sec == 0:
+        return f"{minutes} 分钟"
+    return f"{minutes} 分 {sec} 秒"
+
+
+def format_eta(eta_seconds: Optional[float], samples: int) -> str:
+    """
+    把 ETA 秒数变成文案。
+
+    样本充足 → 仍给区间（±20%/+40%），因为建号耗时抖动很大；
+    样本不足 → 给更宽的区间并注明"约"；
+    完全没有样本 → 只说在估算，不装精确。
+    """
+    if eta_seconds is None or int(samples) <= 0:
+        return "预计耗时正在估算中"
+    value = max(0.0, float(eta_seconds))
+    if int(samples) < _eta_min_samples():
+        return f'预计约 {format_duration(value * 0.5)} ~ {format_duration(value * 1.8)}'
+    return f'预计约 {format_duration(value * 0.8)} ~ {format_duration(value * 1.4)}'
+
+
 @dataclass
 class RegisterJob:
     user_id: int
@@ -19,6 +67,11 @@ class RegisterJob:
     stats: bool
     days: int
     status_message: object
+    # 观测用字段（新增，带默认值，不影响既有位置参数构造）：
+    #   outcome: None=尚未处理完, "ok"=成功建号, "failed"=失败（失败也要进耗时样本）
+    #   started: worker 是否已经开始处理该 job
+    outcome: Optional[str] = None
+    started: bool = False
 
 
 def slot_full_message(reserved: int = 0) -> str:
@@ -50,6 +103,25 @@ def slot_full_message(reserved: int = 0) -> str:
     )
     if reserved > 0:
         text += f'\n\n__其中 {reserved} 个席位已被排队中的注册占位，请稍后再试。__'
+    text += '\n\n__注意：这次是**席位**不够，不是排队的人多 —— 等有席位空出来后即可注册。__'
+    return text
+
+
+def queue_full_message(waiting_limit: int = 0) -> str:
+    """
+    "排队满了"文案 —— 与 slot_full_message 严格区分。
+
+    席位满 = tem + reserved >= all_user（没名额了）；
+    排队满 = 等待队列达到本次可用上限（还有名额，只是等位的人挤满了）。
+    两种情况的用户动作完全不同，不能糊成一条文案。
+    """
+    text = (
+        '**⏳ 排队的人暂时太多了**\n\n'
+        '· 注册席位还有空余 —— 只是等位的人数满了\n'
+    )
+    if int(waiting_limit or 0) > 0:
+        text += f'· 当前可排队人数 | **{int(waiting_limit)}** 人\n'
+    text += '\n__请稍等 1~2 分钟再点一次「创建账户」，队伍会陆续空出来。__'
     return text
 
 
@@ -61,6 +133,11 @@ class RegisterQueueManager:
         self._reserved_slots = 0
         self._lock = asyncio.Lock()
         self._active_jobs = 0
+        # ── 以下字段只用于观测/文案，不参与容量与记账判定 ──
+        self._waiting_order: list[int] = []            # 仍在排队（未被 worker 取走）的用户，FIFO
+        self._active_users: set[int] = set()           # 正在被处理中的用户
+        self._duration_samples: list[tuple[float, bool]] = []  # (wall-clock 秒, 是否成功)
+        self._warn_tasks: dict[int, asyncio.Task] = {}  # user_id -> 超时提醒任务
 
     def _configured_worker_count(self) -> int:
         return max(1, int(getattr(_open, "register_worker_count", 5) or 5))
@@ -95,11 +172,112 @@ class RegisterQueueManager:
         """
         return int(self._reserved_slots)
 
+    # ── 只读观测接口 ────────────────────────────────────────────────────────
+    def waiting_queue_limit(self) -> int:
+        """当前允许排队的人数上限（席位不足时会同步缩小，保证不超卖）。"""
+        return int(self._max_waiting_queue_size_locked())
+
+    def remaining_slot_count(self) -> int:
+        """还剩多少未占用的席位 = all_user - tem - reserved。"""
+        return max(0, self._remaining_slot_count_locked() - int(self._reserved_slots))
+
+    def _effective_worker_count(self) -> int:
+        """
+        生效的并发数：优先用真正在跑的 worker 数，未启动时退回配置值
+        （throttle 补丁会在类层面把配置值压到 max_workers，这里直接沿用它的结果）。
+        """
+        alive = len([task for task in self._workers if not task.done()])
+        if alive > 0:
+            return max(1, alive)
+        return max(1, int(self._configured_worker_count()))
+
+    def _trim_samples(self) -> list[tuple[float, bool]]:
+        window = _eta_window()
+        if len(self._duration_samples) > window:
+            self._duration_samples = self._duration_samples[-window:]
+        return self._duration_samples
+
+    def _eta_inputs(self) -> tuple[Optional[float], int]:
+        """返回 (窗口内平均耗时秒, 样本数)。没有样本时平均值为 None。"""
+        samples = self._trim_samples()
+        if not samples:
+            return None, 0
+        return sum(item[0] for item in samples) / len(samples), len(samples)
+
+    def eta_for(self, ahead: int) -> Optional[float]:
+        """
+        预计还要等多少秒。
+
+        算法：窗口内平均 wall-clock 耗时 ÷ 生效并发数 × 前面的人数。
+        耗时用 time.monotonic() 在 worker 里实测（含 Emby 调用与限流间隔），
+        失败 job 也计入样本（失败同样占用了一个 worker 的时间片）。
+        说明：ahead 含"正在处理中"的 job，所以估算偏保守。
+        """
+        average, samples = self._eta_inputs()
+        if average is None or samples <= 0:
+            return None
+        pending = max(0, int(ahead))
+        return max(0.0, float(average)) * pending / self._effective_worker_count()
+
+    def waiting_line(self, ahead: int, waiting: bool = False) -> str:
+        """
+        生成面向用户的一行排队状态："你前面还有 N 位 · 预计约 M 秒"。
+
+        :param waiting: True 表示这是"已经等了一段时间"的补提示 —— 此时即使
+                        前面没人也不能说"马上开始"（并发槽位可能还没空出来）。
+        """
+        pending = max(0, int(ahead))
+        if pending == 0:
+            if waiting:
+                return '你排在队首，正在等前面几位收尾，马上轮到你。'
+            return '🎉 你排在队首，马上开始创建账号。'
+        _, samples = self._eta_inputs()
+        return f'你前面还有 **{pending}** 位 · {format_eta(self.eta_for(pending), samples)}'
+
+    def stats(self) -> dict:
+        """
+        只读快照，供面板 / 状态命令展示。不修改任何计数。
+
+        返回：waiting / active / workers / reserved / avg_seconds / samples /
+              failures / remaining_slots / queue_limit / waiting_limit / eta_for(n)
+        """
+        average, samples = self._eta_inputs()
+        waiting = int(self._queue.qsize())
+        return {
+            "waiting": waiting,
+            "active": int(self._active_jobs),
+            "workers": self._effective_worker_count(),
+            "reserved": int(self._reserved_slots),
+            "avg_seconds": None if average is None else round(float(average), 3),
+            "samples": samples,
+            "failures": sum(1 for _duration, ok in self._duration_samples if not ok),
+            "remaining_slots": self.remaining_slot_count(),
+            "queue_limit": self._configured_queue_limit(),
+            "waiting_limit": self.waiting_queue_limit(),
+            "eta_for": self.eta_for,
+        }
+
+    def user_queue_position(self, user_id: int) -> Optional[int]:
+        """
+        用户在队列中的位置（1 = 下一个被处理）。
+
+        返回 None = 不在队列里；0 = 正在创建中。
+        只读，不加锁；读到的值最多略有滞后。
+        """
+        if user_id in self._active_users:
+            return 0
+        try:
+            index = self._waiting_order.index(user_id)
+        except ValueError:
+            return None
+        return int(self._active_jobs) + index + 1
+
     async def enqueue(self, job: RegisterJob) -> tuple[bool, str, Optional[int]]:
         await self.ensure_started()
         async with self._lock:
             if job.user_id in self._busy_users:
-                return False, "duplicate", None
+                # 已在队列里：回位置而不是再排一个（去重）
+                return False, "duplicate", self.user_queue_position(job.user_id)
             current_tem = int(_open.tem or 0)
             if current_tem + self._reserved_slots >= _open.all_user:
                 return False, "slot_full", None
@@ -110,13 +288,84 @@ class RegisterQueueManager:
             self._busy_users.add(job.user_id)
             self._reserved_slots += 1
             await self._queue.put(job)
+            self._waiting_order.append(job.user_id)
+            self._schedule_wait_warning(job)
             return True, "queued", ahead + 1
+
+    # ── 观测记账（不改 _active_jobs / _reserved_slots / _busy_users / task_done 语义）──
+    def _on_job_started(self, job: RegisterJob):
+        """worker 取到 job：标记已开始，并把它从"排队中"挪到"处理中"。"""
+        job.started = True
+        self._cancel_wait_warning(job.user_id)
+        try:
+            self._waiting_order.remove(job.user_id)
+        except ValueError:
+            pass
+        self._active_users.add(job.user_id)
+
+    def _on_job_finished(self, job: RegisterJob):
+        self._active_users.discard(job.user_id)
+        self._cancel_wait_warning(job.user_id)
+
+    def _record_job_duration(self, job: RegisterJob, seconds: float):
+        """记录一个已完成 job 的真实 wall-clock 耗时（失败也计入，但打上标记）。"""
+        self._duration_samples.append((max(0.0, float(seconds)), job.outcome == "ok"))
+        self._trim_samples()
+
+    def _schedule_wait_warning(self, job: RegisterJob):
+        """等待过久时补"仍在排队"提示（间隔可配，默认 120s，最多 WARN_REPEAT_MAX 次）。"""
+        delay = _warn_after_seconds()
+        if delay <= 0:
+            return
+        try:
+            task = asyncio.create_task(
+                self._wait_warning(job, delay), name=f"register-queue-warn-{job.user_id}"
+            )
+        except RuntimeError:  # 没有运行中的事件循环时直接跳过
+            return
+        self._warn_tasks[job.user_id] = task
+
+    async def _wait_warning(self, job: RegisterJob, delay: int):
+        """
+        等待过久就给用户刷新一次排队状态（位置 + ETA）。
+
+        队列拉长后尾部可能等十几分钟，只提示一次太干；这里以
+        `register_queue_warn_after_seconds` 为间隔重复，但最多 WARN_REPEAT_MAX 次，
+        避免长时间占着 Telegram 的编辑配额。job 一开始处理就取消
+        （见 _on_job_started / _cancel_wait_warning）。
+        """
+        try:
+            for _ in range(WARN_REPEAT_MAX):
+                await asyncio.sleep(delay)
+                if job.started or job.outcome is not None:
+                    return
+                position = self.user_queue_position(job.user_id)
+                if position is None or position <= 0:
+                    return
+                await self._safe_edit(
+                    job.status_message,
+                    f'⏳ **仍在排队中，请再稍等一会儿**\n\n'
+                    f'{self.waiting_line(position - 1, waiting=True)}\n\n'
+                    f'__创建完成后我会在这里直接通知你，请勿重复提交。__',
+                )
+        except asyncio.CancelledError:
+            return
+        except Exception as e:
+            LOGGER.warning(f"注册队列排队提示发送失败: tg={job.user_id}, error={e}")
+
+    def _cancel_wait_warning(self, user_id: int):
+        task = self._warn_tasks.pop(user_id, None)
+        if task is not None and not task.done():
+            task.cancel()
 
     async def _worker_loop(self, worker_index: int):
         while True:
             job = await self._queue.get()
             async with self._lock:
                 self._active_jobs += 1
+            # 以下均为只读观测：开始时刻 / 排队→处理中的状态迁移
+            self._on_job_started(job)
+            started_at = time.monotonic()
 
             try:
                 await self._process_job(job)
@@ -124,13 +373,16 @@ class RegisterQueueManager:
                 LOGGER.exception(f"注册队列worker异常[{worker_index}]: {e}")
                 await self._safe_edit(job.status_message, "❌ 注册任务执行异常，请稍后重试。", re_create_ikb)
             finally:
+                self._record_job_duration(job, time.monotonic() - started_at)
                 async with self._lock:
                     self._active_jobs = max(0, self._active_jobs - 1)
                     self._busy_users.discard(job.user_id)
                     self._reserved_slots = max(0, self._reserved_slots - 1)
+                self._on_job_finished(job)
                 self._queue.task_done()
 
     async def _process_job(self, job: RegisterJob):
+        job.outcome = "failed"
         async with get_user_lock(job.user_id):
             current = sql_get_emby(tg=job.user_id)
             if not current:
@@ -145,7 +397,8 @@ class RegisterQueueManager:
 
             await self._safe_edit(
                 job.status_message,
-                f'🆗 已进入处理\n\n用户名：**{job.username}**  安全码：**{job.pwd2}** \n\n__正在为您初始化账户，更新用户策略__......',
+                f'🆗 已进入处理\n\n用户名：**{job.username}**  安全码：**{job.pwd2}** \n\n'
+                f'__正在创建账号…（这一步要等 emby 建号，请勿关闭会话）__......',
             )
 
             data = await emby.emby_create(name=job.username, days=job.days)
@@ -202,6 +455,7 @@ class RegisterQueueManager:
             else:
                 ex_text = '__无需保号，放心食用__'
 
+            job.outcome = "ok"
             await self._safe_edit(
                 job.status_message,
                 f'**▎创建用户成功🎉**\n\n'

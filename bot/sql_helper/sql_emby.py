@@ -26,6 +26,16 @@ class Emby(Base):
     iv = Column(Integer, default=0)
     ch = Column(DateTime, nullable=True)
     concurrent_warn_count = Column(Integer, default=0)
+    # 「临时封禁踢流」的还原到期时间（UTC，naive）。
+    #
+    # 非 NULL 表示：机器人为了踢掉超限的播放流，把这个用户的 Emby 账号
+    # `IsDisabled` 置成了 true，到期必须由机器人自己还原。
+    #
+    # 为什么一定要落库、而不能只靠 try/finally：置真与还原之间隔着几十秒
+    # （实测客户端要 5~67 秒才真正放弃），进程若在这中间被 SIGKILL、容器被
+    # 重建或机器断电，finally 根本不会执行，用户就被**永久封禁**了 —— 而用户
+    # 看到的只是"看不了片"，不会知道要找管理员。落库之后启动时可以扫出来还原。
+    kick_until = Column(DateTime, nullable=True)
 
 def sql_add_emby(tg: int):
     """
@@ -263,3 +273,24 @@ def sql_count_emby():
             return None, None, None
         else:
             return count.tg_count, count.embyid_count, count.lv_a_count
+
+
+def sql_get_pending_kicks():
+    """
+    查出所有「临时封禁踢流」尚未还原的记录（kick_until 非 NULL）。
+
+    启动时用它做崩溃自恢复：进程若在「禁用」与「还原」之间被杀，这些用户的
+    Emby 账号会停在 IsDisabled=true 上，必须无条件还原 —— 哪怕 kick_until
+    还没到，也要立刻还原（宁可少踢一次流，也不能把用户永久锁死）。
+
+    :return: [(tg, embyid, kick_until), ...]；出错返回 []
+    """
+    with Session() as session:
+        try:
+            rows = session.query(Emby.tg, Emby.embyid, Emby.kick_until).filter(
+                Emby.kick_until.isnot(None)
+            ).all()
+            return [(r[0], r[1], r[2]) for r in rows]
+        except Exception as e:
+            LOGGER.error(f"查询待还原的临时封禁失败: {e}")
+            return []

@@ -15,7 +15,8 @@ from bot import bot, LOGGER, _open, emby_line, sakura_b, ranks, group, config, b
 from pyrogram import filters
 from bot.func_helper.concurrency import get_user_lock
 from bot.func_helper.emby import emby
-from bot.func_helper.register_queue import get_register_queue_manager, RegisterJob, slot_full_message
+from bot.func_helper.register_queue import get_register_queue_manager, RegisterJob, slot_full_message, \
+    queue_full_message
 from bot.func_helper.filters import user_in_group_on_filter
 from bot.func_helper.utils import members_info, cr_link_one, judge_admins, tem_deluser, pwd_create
 from bot.func_helper.fix_bottons import members_ikb, back_members_ikb, del_me_ikb, re_delme_ikb, \
@@ -70,16 +71,33 @@ async def create_user(_, call, stats):
                 )
             )
             if ok:
+                # position 是"含正在处理中"的总序号，前面还有 position-1 位
+                ahead = max(0, int(position or 1) - 1)
                 return await editMessage(
                     send,
-                    f'🆗 会话结束，收到设置\n\n用户名：**{emby_name}**  安全码：**{emby_pwd2}** \n\n'
-                    f'__已进入注册队列，当前排队序号：{position}__\n'
-                    f'请耐心等待，创建完成后我会在这里直接通知你。',
+                    f'🆗 会话结束，收到设置\n\n用户名：**{emby_name}**  安全码：**{emby_pwd2}**\n\n'
+                    f'{queue.waiting_line(ahead)}\n\n'
+                    f'__建号期间请勿重复提交，创建完成后我会直接在这里通知你。__',
+                )
+
+            if reason == "duplicate":
+                position = queue.user_queue_position(call.from_user.id)
+                if position and position > 0:
+                    return await editMessage(
+                        send,
+                        f'⏳ **你已在队列中，第 {position} 位。**\n\n'
+                        f'{queue.waiting_line(position - 1)}\n\n'
+                        f'__创建完成后我会在这里直接通知你，请勿重复提交。__',
+                    )
+                return await editMessage(
+                    send,
+                    f'⏳ **你已在队列中，正在为你创建账号。**\n\n'
+                    f'__请勿重复提交，创建完成后我会在这里直接通知你。__',
                 )
 
             failure_text = {
-                "duplicate": "⚠️ 你已经有一个注册任务正在排队或处理中，请勿重复提交。",
-                "queue_full": "⚠️ 当前注册排队人数过多，请稍后再试。",
+                # queue_full = 还有席位，只是等位的人满了；与 slot_full 必须分开说
+                "queue_full": queue_full_message(queue.waiting_queue_limit()),
                 # slot_full 由 enqueue() 在 tem + reserved >= all_user 时返回，
                 # 所以要把"已占位"的数量一并展示，否则用户会疑惑
                 # "明明还剩几个席位为什么提示已满"
@@ -124,7 +142,10 @@ async def create(_, call):
     stats = None
     queue = get_register_queue_manager()
     if await queue.is_user_busy(call.from_user.id):
-        return await callAnswer(call, '⚠️ 你已有注册任务正在排队或处理中，请稍后。', True)
+        position = queue.user_queue_position(call.from_user.id)
+        if position and position > 0:
+            return await callAnswer(call, f'⏳ 你已在队列中，第 {position} 位，请耐心等待。', True)
+        return await callAnswer(call, '⏳ 你已在队列中，正在为你创建账号，请勿重复提交。', True)
 
     async with get_user_lock(call.from_user.id):
         e = sql_get_emby(tg=call.from_user.id)

@@ -12,6 +12,16 @@ from bot.func_helper.filters import admins_on_filter
 from bot.func_helper.utils import split_long_message
 from bot.func_helper.msg_utils import deleteMessage
 
+# 会话列表必须带 ActiveWithinSeconds：裸 `/emby/Sessions` 在线上返回
+# 2,970,545 B / 4037 条永不清理的僵尸会话，导致「当前在线人数」长期显示成
+# 4000 多人（实际只有几十人），同时每分钟给 Emby 制造一次 3MB 序列化压力。
+# 带 `?ActiveWithinSeconds=300` 后是 89,940 B / 75 条 —— 在线人数终于是对的。
+try:  # 限流模块缺失时退回默认窗口，不影响命令本身
+    from bot.func_helper.register_throttle import sessions_endpoint as _sessions_endpoint
+except Exception:  # pragma: no cover
+    def _sessions_endpoint() -> str:
+        return "/emby/Sessions?ActiveWithinSeconds=300"
+
 
 @bot.on_message(filters.command(["watching", "playing"], prefixes) & admins_on_filter)
 async def watching_command(_, message: Message):
@@ -22,8 +32,8 @@ async def watching_command(_, message: Message):
     processing_msg = await message.reply("📊 正在获取 Emby 服务器当前状态...")
 
     try:
-        # 发送请求获取活跃会话
-        result = await emby._request("GET", "/emby/Sessions")
+        # 发送请求获取活跃会话（带 ActiveWithinSeconds，避免拉回几千条僵尸会话）
+        result = await emby._request("GET", _sessions_endpoint())
 
         if not result.success:
             # B-L10：把真实的失败原因透出，不再固定写成"连接超时或未知错误"

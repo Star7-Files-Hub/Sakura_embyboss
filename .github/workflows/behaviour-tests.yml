@@ -21,6 +21,18 @@ jobs:
       fail-fast: false
       matrix:
         python-version: ["3.10", "3.12"]
+        suite:
+          - test_kk_warn_panel
+          - test_warn_plus_button
+          - test_warn_count_race
+          - test_terminate_verify
+          - test_temp_kick
+          - test_emby_policy
+          - test_kick_verify_userid
+          - test_removal
+          - test_backup_sends_config
+          - test_backup_recipient
+          - test_emby_limiter
     steps:
       - uses: actions/checkout@v4
 
@@ -33,23 +45,50 @@ jobs:
       - name: 安装测试依赖
         run: pip install "pydantic==2.1.1"
 
-      - name: 单用户警告调整 / 面板刷新
-        run: python tests/test_kk_warn_panel.py
+      # 其它 10 套走「AST 抽取 + 桩模块」，只要 stdlib + pydantic。
+      # 但 test_emby_limiter.py 测的是**真实**的 register_throttle / register_queue /
+      # 建号快路径，必须真正 `import bot` —— 于是需要运行期依赖 + 一份 config.json
+      # （config.json 被 .gitignore 排除，CI 里要用模板现造一份）。
+      # 刻意**不**给它静默 SKIP 的后门：跑不了就让 CI 红，别再造一次「徽章全绿但没测」。
+      - name: 为 test_emby_limiter 准备运行期依赖与 config.json
+        if: matrix.suite == 'test_emby_limiter'
+        run: |
+          set -euo pipefail
+          cp config_example.json config.json
+          pip install -r requirements.txt
 
-      - name: 终止流复验
-        run: python tests/test_terminate_verify.py
+      - name: 跑 ${{ matrix.suite }}
+        env:
+          # 没有数据库，别让 alembic 自动迁移卡住导入
+          SAKURA_SKIP_AUTO_MIGRATE: "1"
+        run: python tests/${{ matrix.suite }}.py
 
-      - name: 播放速率限制移除
-        run: python tests/test_removal.py
+  # 这个 job 专门防「新加的套件忘了写进 CI」。
+  # 本项目已经发生过一次：套件从 7 个涨到 10 个，CI 清单还停在 7 个，
+  # 于是新套件在 CI 里**从来没跑过**，而所有徽章都是绿的。
+  # 只比对清单与磁盘，不跑测试，所以很快。
+  suite-coverage:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: CI 清单必须覆盖 tests/ 下全部 test_*.py
+        run: |
+          python - <<'PY'
+          import pathlib, re, sys
 
-      - name: 备份同时发送 .sql 与 config.json 给 owner
-        run: python tests/test_backup_sends_config.py
+          wf = pathlib.Path(".github/workflows/behaviour-tests.yml").read_text(encoding="utf-8")
+          # matrix 的 suite 列表：缩进后以 "- test_" 开头的行
+          declared = set(re.findall(r"^\s+-\s+(test_[A-Za-z0-9_]+)\s*$", wf, re.M))
+          on_disk = {p.stem for p in pathlib.Path("tests").glob("test_*.py")}
 
-      - name: 备份收件人硬绑定 owner 私聊（拒绝群组）
-        run: python tests/test_backup_recipient.py
-
-      - name: /kk 警告+1 按钮
-        run: python tests/test_warn_plus_button.py
-
-      - name: 警告计数丢失更新竞态（检测任务 vs 管理员调整）
-        run: python tests/test_warn_count_race.py
+          missing = sorted(on_disk - declared)
+          stale = sorted(declared - on_disk)
+          for s in missing:
+              print(f"::error::tests/{s}.py 存在于仓库但没写进 CI 清单，永远不会被跑")
+          for s in stale:
+              print(f"::error::CI 清单里的 {s} 在 tests/ 下不存在")
+          print(f"CI 清单 {len(declared)} 套，磁盘 {len(on_disk)} 套")
+          if missing or stale:
+              sys.exit(1)
+          print("✅ CI 清单与 tests/ 完全一致")
+          PY

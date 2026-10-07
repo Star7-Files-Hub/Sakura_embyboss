@@ -34,3 +34,8 @@ caddy-local.log
 # 本地环境变量（如 REGISTER_QUEUE_REAL 等调试开关）
 .env
 .env.*
+
+# 建号限流的侧车调参文件（bot/func_helper/register_throttle.py 热加载它）。
+# 里面的值是**本机实例相关**的调参结果（间隔/分片/熔断阈值），不该进版本库；
+# 模板与全部键名见 register_throttle.py 的 DEFAULTS 和 config.json 的 open 段。
+register_throttle.json

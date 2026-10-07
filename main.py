@@ -4,6 +4,14 @@
 import asyncio
 from bot import bot, LOGGER
 
+# 安全批量建号限流闸门（可选模块）：把 Embyservice._request 与注册队列 worker
+# 挂到统一闸门上，避免批量建号把 Emby 打挂。import/挂载失败都不影响启动。
+try:
+    import bot.func_helper.register_throttle as register_throttle
+    register_throttle.install()
+except Exception as _throttle_err:  # pragma: no cover
+    LOGGER.error(f"挂载安全批量建号限流失败（将按原行为运行）: {_throttle_err}")
+
 # 面板
 from bot.modules.panel import *
 # 命令
@@ -53,6 +61,23 @@ async def _on_startup():
             LOGGER.info(f"已恢复同时播放限制检测任务，间隔 {interval} 秒")
     except Exception as e:
         LOGGER.error(f"恢复同时播放限制检测任务失败: {e}")
+
+    # 3.5) 崩溃自恢复：把上次运行遗留的「临时封禁踢流」全部还原。
+    #
+    # 进程若在「禁用」与「还原」之间被杀（SIGKILL / 容器重建 / 断电），
+    # try/finally 与后台还原任务都不会执行，用户会停在 IsDisabled=true 上被**永久锁死** ——
+    # 而他只会看到"看不了片"，根本不知道要找管理员。
+    # 这里**无条件**还原（不看 kick_until 是否到期）：宁可少踢一次流，
+    # 也绝不能因为一次异常退出就把用户锁在门外。
+    try:
+        from bot.modules.extra.concurrent_play_monitor import restore_pending_kicks
+        restored = await restore_pending_kicks(only_expired=False)
+        if restored:
+            LOGGER.warning(
+                f"启动自恢复：已还原 {restored} 个遗留的临时封禁（上次运行未正常收尾）"
+            )
+    except Exception as e:
+        LOGGER.error(f"启动自恢复临时封禁失败: {e}")
 
     # 4) 开机任务：设置命令菜单、清理重启状态、预热 peer 缓存。
     # 原先由 bot/modules/panel/sched_panel.py 在模块导入期用 loop.call_later 注册，

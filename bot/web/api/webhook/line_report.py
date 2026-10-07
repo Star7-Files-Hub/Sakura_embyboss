@@ -8,7 +8,7 @@ Date:2026/4/15
 使用方式：
     nginx 中在每条线路的 server 块中，对播放相关的 location 使用 mirror 指令，
     将请求的 userId 和对应的线路名称转发到此端点。
-    Bot 收到后进行线路权限检查，若违规则终止会话/封禁用户。
+    Bot 收到后进行线路权限检查，若违规则下发停止指令/封禁用户。
 """
 from fastapi import APIRouter, Header
 from bot.sql_helper.sql_emby import Emby, sql_get_emby, sql_update_emby
@@ -261,7 +261,7 @@ def identity_is_corroborated(
     因此要求：存在一个会话，其 UserId 等于解析结果，且其 AccessToken/Id/PlaySessionId
     与请求携带的密钥一致。
 
-    :return: True 表示身份已被证实，可以据此执行封禁/终止会话等强制动作
+    :return: True 表示身份已被证实，可以据此执行封禁/下发停止指令等强制动作
     """
     if not resolved_user_id:
         return False
@@ -297,7 +297,7 @@ async def resolve_user_context(
     """从 userId / 认证头 / 活跃会话中尽量反查用户上下文
 
     :return: (resolved_user_id, matched_session, resolved_from, identity_verified)
-             identity_verified 为 True 时才允许执行强制动作（终止会话/封禁）
+             identity_verified 为 True 时才允许执行强制动作（下发停止指令/封禁）
     """
     auth_info = parse_emby_authorization(auth_header)
     original_query = parse_original_request_uri(original_request_uri)
@@ -410,7 +410,7 @@ async def resolve_user_context(
 
     # 身份证实：必须由"密钥型"线索（token / sessionId / playSessionId）与活跃会话匹配，
     # 且该会话的 UserId 与解析出的用户一致。
-    # 仅凭 query.userId 或 deviceId 命中的身份只用于展示与告警，不能据此封禁/终止会话。
+    # 仅凭 query.userId 或 deviceId 命中的身份只用于展示与告警，不能据此封禁/下发停止指令。
     identity_verified = identity_is_corroborated(
         sessions,
         resolved_user_id,
@@ -477,20 +477,32 @@ async def handle_line_violation(
     """
     action_taken_list = []
     block_success = False
-    terminate_success = False
+    # 语义：停止指令是否被服务端**受理**，不是「流是否已经断了」。
+    terminate_accepted = False
 
     terminate_session_enabled = getattr(config, "line_filter_terminate_session", True)
     block_user_enabled = getattr(config, "line_filter_block_user", False)
 
     if terminate_session_enabled:
-        reason = "您使用的线路与您的账户等级不匹配，请使用正确的线路"
-        terminate_success = await emby.terminate_session(session_id, reason)
-        if terminate_success:
-            action_taken_list.append("✅ 已终止会话")
-            LOGGER.info(f"成功终止违规会话 {session_id}")
+        if not session_id:
+            # 没匹配到会话时 session_id 是空串，f-string 会拼出
+            # /emby/Sessions//Playing/Stop —— 无意义且必然无效的请求。
+            # 跳过并留下线索，不要发出去，也不要假装做过什么。
+            action_taken_list.append("⏭️ 未匹配到会话，跳过停止指令")
+            LOGGER.warning("未匹配到会话，跳过下发停止指令")
         else:
-            action_taken_list.append("❌ 终止会话失败")
-            LOGGER.error(f"终止违规会话失败 {session_id}")
+            reason = "您使用的线路与您的账户等级不匹配，请使用正确的线路"
+            # terminate_session() 返回 True 只代表服务端**受理**了停止指令：它是向
+            # 客户端下发的远程控制指令，这台 Emby 上的客户端群体基本不支持远程控制
+            # （实测 204 之后 30 秒仍在播）。真正能停流的是把用户策略 IsDisabled
+            # 置真（下面 block_user_enabled 那条路径）。所以这里只敢说「已下发」。
+            terminate_accepted = await emby.terminate_session(session_id, reason)
+            if terminate_accepted:
+                action_taken_list.append("⏳ 已下发停止指令（待确认）")
+                LOGGER.info(f"已下发停止指令（服务端已受理，不代表已断流）{session_id}")
+            else:
+                action_taken_list.append("❌ 下发停止指令失败")
+                LOGGER.error(f"下发停止指令失败 {session_id}")
 
     if block_user_enabled:
         block_success = await emby.emby_change_policy(emby_id=emby_id, disable=True)
@@ -504,6 +516,13 @@ async def handle_line_violation(
             LOGGER.error(f"封禁违规用户失败 {emby_id}")
 
     action_taken = " | ".join(action_taken_list) if action_taken_list else "仅记录，未采取行动"
+    # 这段文案既发管理群、也会被 log_line_violation forward 给用户本人，所以不能只按
+    # 管理员口径写：必须让用户也明白「指令已下发 ≠ 已经断流」，否则就是又一次谎报。
+    if terminate_accepted:
+        action_taken += (
+            "\nℹ️ 说明：「已下发停止指令」表示服务端受理了停止请求；"
+            "若你的播放器不支持远程控制，播放可能不会立即停止，请手动停止播放。"
+        )
 
     await log_line_violation(
         user_id=emby_id,
@@ -516,7 +535,13 @@ async def handle_line_violation(
     )
 
     return {
-        "terminate_success": terminate_success,
+        # ⚠️ 字段名保持 "terminate_success" 不变：已有外部调用方按这个名字取值，
+        # 改名属于破坏性契约变更。但它的**语义**是「停止指令是否被服务端受理」，
+        # **不是**「流是否已经断了」——`POST /Sessions/{Id}/Playing/Stop` 只是向
+        # 客户端下发远程控制指令，这台 Emby 上的客户端群体基本不支持远程控制
+        # （实测 204 之后 30 秒仍在播）。调用方不要用它判断「已经停止播放」；
+        # 真正能停流的是用户策略 IsDisabled（见 block_success / emby_change_policy）。
+        "terminate_success": terminate_accepted,
         "block_success": block_success,
         "action_taken": action_taken,
     }
@@ -619,7 +644,7 @@ async def line_report(
                 "resolved_from": resolved_from,
             }
 
-        # 冷却期内的重复上报直接忽略（播放器不响应终止会话时会持续上报）
+        # 冷却期内的重复上报直接忽略（正因客户端不响应停止指令，它才会持续上报）
         if is_in_cooldown(resolved_user_id):
             cooldown_seconds = getattr(config, "line_filter_cooldown_seconds", 60)
             LOGGER.debug(

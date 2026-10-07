@@ -57,7 +57,7 @@
     "open_us": 30,
     "all_user": 1000,
     "register_worker_count": 5,
-    "register_queue_limit": 100,
+    "register_queue_limit": 300,
     "timing": 0,
     "tem": 0,
     "checkin": true,

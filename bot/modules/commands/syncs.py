@@ -24,6 +24,8 @@ from pyrogram.errors import FloodWait
 from sqlalchemy import and_
 from bot import bot, prefixes, bot_photo, LOGGER, owner, group
 from bot.func_helper.emby import emby
+# 安全批量建号限流闸门：/restore_from_db 会串行建 2000+ 个号，必须限速
+from bot.func_helper import register_throttle
 from bot.func_helper.filters import admins_on_filter
 from bot.func_helper.utils import tem_deluser, split_long_message
 from bot.sql_helper.sql_emby import get_all_emby, Emby, sql_get_emby, sql_update_embys, sql_delete_emby, sql_update_emby
@@ -286,6 +288,8 @@ async def restore_from_db(_, msg):
         sign_name = f'{msg.sender_chat.title}' if msg.sender_chat else f'{msg.from_user.first_name}'    
         LOGGER.info(
             f"{sign_name} 执行了从数据库中恢复用户到Emby中的操作")
+        # 把本任务（含其全部 Emby 请求）切到批量 lane：并发 1 + 最小间隔 + 熔断保护
+        register_throttle.enter_batch()
         embyusers = get_all_emby(and_(Emby.embyid.isnot(None), Emby.embyid != ''))
         group_id = group[0]
         # 获取当前执行命令的群组成员
@@ -295,6 +299,14 @@ async def restore_from_db(_, msg):
         success_count = 0
         fail_count = 0
         for embyuser in embyusers:
+            # 限速钩子：保证与上一次建号间隔 >= register_min_interval_ms，
+            # 每 register_shard_size 个插入 register_batch_gap 秒批间隔；
+            # 熔断期间在此等待冷却；收到 request_stop() 时抛 BatchAborted 结束任务。
+            try:
+                await register_throttle.tick()
+            except register_throttle.BatchAborted as e:
+                text += f'**- ⏹ 恢复任务已中止：{e}\n**'
+                break
             if embyuser.tg in chat_members:
                 try:
                     # emby api操作

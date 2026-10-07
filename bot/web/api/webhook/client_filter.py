@@ -94,20 +94,31 @@ async def log_blocked_request(
     client_name: str = None,
     tg_id: int = None,
     user_lv: str = None,
-    terminate_success: bool = False,
+    terminate_accepted: bool = False,
     block_success: bool = False,
 ):
     """记录被拦截的请求"""
     try:
         lv_display = {'a': '白名单', 'b': '普通用户', 'c': '封禁用户', 'd': '未注册'}.get(user_lv, '未知')
         action_list = []
-        if terminate_success:
-            action_list.append("✅ 已终止会话")
-        elif terminate_success is False and session_id:
-            action_list.append("❌ 终止会话失败")
+        if terminate_accepted:
+            # terminate_session() 返回 True 只代表服务端**受理**了停止指令：
+            # 它是向客户端下发的远程控制指令，而这台 Emby 上的客户端群体基本不支持
+            # 远程控制（实测返回 204、30 秒后仍在播）。绝不能写成「已终止会话」。
+            action_list.append("⏳ 已下发停止指令（待确认）")
+        elif terminate_accepted is False and session_id:
+            action_list.append("❌ 下发停止指令失败")
         if block_success:
             action_list.append("✅ 已封禁用户")
         action = " | ".join(action_list) if action_list else "仅记录，未采取行动"
+        # 这段文案既发管理群、也会 forward 给用户本人，所以不能只按管理员口径写：
+        # 必须让用户也明白「指令已下发 ≠ 已经断流」，否则就是又一次谎报。
+        terminate_note = ""
+        if terminate_accepted:
+            terminate_note = (
+                "\nℹ️ 说明：「已下发停止指令」表示服务端受理了停止请求；"
+                "若你的播放器不支持远程控制，播放可能不会立即停止，请手动停止播放。"
+            )
         log_message = (
             f"🚫 拦截非法客户端\n"
             f"━━━━━━━━━━━━━━━\n"
@@ -121,6 +132,7 @@ async def log_blocked_request(
             f"━━━━━━━━━━━━━━━\n"
             f"🚨 处理措施: {action}\n"
             f"⏰ 时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+            f"{terminate_note}"
         )
 
         LOGGER.warning(log_message)
@@ -139,17 +151,29 @@ async def log_blocked_request(
 
 
 async def terminate_blocked_session(session_id: str, client_name: str) -> bool:
-    """终止被拦截的会话"""
+    """向被拦截的会话下发停止指令。
+
+    :return: True 只代表服务端**受理**了停止指令，**不代表流已经断了** ——
+        `POST /Sessions/{Id}/Playing/Stop` 是向客户端下发的远程控制指令，这台
+        Emby 上的客户端群体基本不支持远程控制（实测 204 之后 30 秒仍在播）。
+        真正能停流的是把用户策略 `IsDisabled` 置真（见 `emby_change_policy`），
+        调用方不要拿 True 当「已断流」写文案。
+    """
+    if not session_id:
+        # session_id 为空时 f-string 会拼出 /emby/Sessions//Playing/Stop ——
+        # 无意义且必然无效的请求，直接跳过并留下线索，不要发出去。
+        LOGGER.warning(f"未匹配到会话，跳过下发停止指令（client={client_name}）")
+        return False
     try:
         reason = f"检测到可疑客户端: {client_name}"
-        success = await emby.terminate_session(session_id, reason)
-        if success:
-            LOGGER.info(f"成功终止可疑会话 {session_id}")
+        accepted = await emby.terminate_session(session_id, reason)
+        if accepted:
+            LOGGER.info(f"已下发停止指令（服务端已受理，不代表已断流）{session_id}")
         else:
-            LOGGER.error(f"终止会话失败 {session_id}")
-        return success
+            LOGGER.error(f"下发停止指令失败 {session_id}")
+        return accepted
     except Exception as e:
-        LOGGER.error(f"终止会话异常 {session_id}: {str(e)}")
+        LOGGER.error(f"下发停止指令异常 {session_id}: {str(e)}")
         return False
 
 
@@ -210,10 +234,10 @@ async def handle_client_filter_webhook(request: Request):
         filter_mode = get_client_filter_mode()
 
         if is_blocked:
-            terminate_success = False
+            terminate_accepted = False
             # 根据配置决定是否终止会话
             if getattr(config, "client_filter_terminate_session", True):
-                terminate_success = await terminate_blocked_session(session_id, client_name)
+                terminate_accepted = await terminate_blocked_session(session_id, client_name)
             block_success = False
 
             user_details = sql_get_emby(emby_id)
@@ -231,7 +255,7 @@ async def handle_client_filter_webhook(request: Request):
                 client_name=client_name,
                 tg_id=user_details.tg if user_details else None,
                 user_lv=user_details.lv if user_details else None,
-                terminate_success=terminate_success,
+                terminate_accepted=terminate_accepted,
                 block_success=block_success,
             )
 

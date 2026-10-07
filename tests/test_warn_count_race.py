@@ -133,8 +133,12 @@ def make_ns(db, on_terminate=None, threshold=3, limit=2):
     def sql_update_emby(where, **kw):
         col, val = where
         assert col == "tg", where
+        # 真实实现返回 bool；kick_user_streams 会检查这个返回值（False = 落库失败
+        # 就绝不禁用），所以替身必须如实返回 True，否则会把"落库失败"路径当成正常路径。
+        calls["db_writes"].append(dict(kw))
         if val in db:
             db[val].__dict__.update(kw)
+        return True
 
     ns["sql_get_emby"] = sql_get_emby
     ns["sql_get_by_embyid"] = sql_get_by_embyid
@@ -147,7 +151,9 @@ def make_ns(db, on_terminate=None, threshold=3, limit=2):
 
     ns["emby_mod"] = types.SimpleNamespace(is_emby_admin=is_emby_admin)
 
-    calls = {"terminate": 0, "ban": [], "announce": [], "warn": []}
+    calls = {"terminate": 0, "ban": [], "announce": [], "warn": [], "db_writes": [],
+             "restore_sweep": [], "is_disabled": [], "set_disabled": [], "kick_worker": [],
+             "kick_verify": []}
 
     async def terminate_all_user_sessions(emby_user_id, sessions, reason=""):
         calls["terminate"] += 1
@@ -180,12 +186,115 @@ def make_ns(db, on_terminate=None, threshold=3, limit=2):
     ns["send_group_announcement"] = send_group_announcement
 
     ns["_schedule_stop_verify"] = lambda *a, **k: None
+    # 2026-10-06 二轮：kick 路径不再用「按旧 session id」的复验，改成
+    # `_schedule_kick_verify(emby_user_id, user_name, wait, stream_count)`
+    # （按 UserId 复查，因为解封后重连会生成新 session id）。
+    # 本套件只关心警告计数竞态，这里换成记录替身即可；复验的判定语义由
+    # tests/test_kick_verify_userid.py 与 tests/test_terminate_verify.py 覆盖。
+    def _schedule_kick_verify(emby_user_id, user_name, wait, stream_count):
+        calls["kick_verify"].append((emby_user_id, user_name, wait, stream_count))
+
+    ns["_schedule_kick_verify"] = _schedule_kick_verify
     ns["_now_str"] = lambda: "2026-10-04 22:00:00"
+
+    # ── 2026-10-06 新增：check_concurrent_play_limit 现在会真的去「临时封禁踢流」 ──
+    #
+    # 停流路径改了：先下发 Stop（对本服务器客户端无效），未达阈值时改成
+    # `kick_user_streams()`（临时禁用账号几十秒后自动还原）。所以本套件必须
+    # 把 **真实的** kick_user_streams 一起抽出来执行 —— 否则它只会在运行时报
+    # NameError（这正是本套件上一次崩溃的原因），而不是真正验证竞态。
+    #
+    # 只把两样东西换成替身，理由明确：
+    #   · restore_pending_kicks —— 它内部 `from bot.sql_helper.sql_emby import ...`
+    #     会去连真实数据库；本套件只关心警告计数竞态，替身直接返回 0 条。
+    #   · _kick_restore_worker  —— 真实实现会 sleep 45 秒；它的「到期还原 /
+    #     被取消也要还原」由 tests/test_temp_kick.py 行为级覆盖，这里换成 no-op，
+    #     避免每次跑本套件都挂一个 45 秒的待取消任务。
+    from datetime import datetime, timedelta, timezone
+
+    ns["asyncio"] = asyncio
+    ns["datetime"] = datetime
+    ns["timedelta"] = timedelta
+    ns["timezone"] = timezone
+    ns["_KICK_HOLD_SECONDS"] = module_const("_KICK_HOLD_SECONDS")
+    ns["_KICK_VERIFY_ATTEMPTS"] = module_const("_KICK_VERIFY_ATTEMPTS")
+    ns["_KICK_VERIFY_INTERVAL"] = 0
+    ns["_KICK_TASKS"] = set()
+
+    async def restore_pending_kicks(only_expired=False):
+        calls["restore_sweep"].append(only_expired)
+        return 0
+
+    ns["restore_pending_kicks"] = restore_pending_kicks
+
+    async def _kick_restore_worker(emby_user_id, tg_id, hold_seconds):
+        calls["kick_worker"].append((emby_user_id, tg_id, hold_seconds))
+
+    ns["_kick_restore_worker"] = _kick_restore_worker
+
+    class _EmbyDouble:
+        """真实 kick_user_streams 依赖的两个只读/写入方法。"""
+
+        async def is_user_disabled(self, emby_id):
+            calls["is_disabled"].append(emby_id)
+            return False          # 用户本来是启用的 → 允许临时封禁
+
+        async def set_user_disabled(self, emby_id, disabled):
+            calls["set_disabled"].append((emby_id, disabled))
+            return True
+
+    ns["emby"] = _EmbyDouble()
 
     return ns, calls, logs
 
 
-FN_SRC = extract(SRC, "check_concurrent_play_limit")
+# 被测函数集合：被测函数本身 + 它真正调用到的新函数。
+# 新增停流路径后，check_concurrent_play_limit 会调用 kick_user_streams()，
+# 而 kick_user_streams 依赖 _utcnow()。把它们一起抽出来执行，才能继续做
+# 行为级验证（而不是只做源码字符串断言）。
+EXTRACTED_FUNCS = ("check_concurrent_play_limit", "kick_user_streams", "_utcnow")
+FN_SRC = "\n\n\n".join(extract(SRC, n) for n in EXTRACTED_FUNCS)
+
+
+def referenced_globals(src):
+    """列出这段源码里**引用了但未在本地绑定**的名字（即必须由命名空间提供的）。
+
+    只减掉真正在本地绑定的名字（赋值目标、for 目标、函数参数、with ... as、
+    except ... as、推导式目标、import 别名），否则局部变量会被误报成缺失的替身。
+    """
+    tree = ast.parse(src)
+    bound = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del)):
+            bound.add(node.id)
+        elif isinstance(node, ast.arg):
+            bound.add(node.arg)
+        elif isinstance(node, ast.ExceptHandler) and node.name:
+            bound.add(node.name)
+        elif isinstance(node, (ast.Import, ast.ImportFrom)):
+            for alias in node.names:
+                bound.add((alias.asname or alias.name).split(".")[0])
+        elif isinstance(node, (ast.Global, ast.Nonlocal)):
+            bound.update(node.names)
+        elif isinstance(node, ast.Lambda):
+            bound.update(a.arg for a in node.args.args)
+    used = {n.id for n in ast.walk(tree)
+            if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load)}
+    return used - bound
+
+
+def env_selfcheck(ns):
+    """命名空间自检：抽取的函数引用的每个全局都必须有替身。
+
+    这正是在修本套件上一次的崩溃：新增了 kick_user_streams 调用、但抽取/替身
+    没跟上，结果跑到一半抛 NameError，把「测试环境没搭好」伪装成「测试崩溃」。
+    现在改成提前一次性列出缺哪些名字，报 FAIL 而不是崩。
+    """
+    import builtins
+    missing = sorted(n for n in referenced_globals(FN_SRC)
+                     if n not in ns and not hasattr(builtins, n))
+    check("环境自检：被测函数引用的全局在替身命名空间里都有定义", missing == [],
+          f"缺少 {missing}")
 
 
 def build_fn(ns):
@@ -196,7 +305,8 @@ def build_fn(ns):
 
 def run_case(on_terminate, db, threshold=3):
     ns, calls, logs = make_ns(db, on_terminate=on_terminate, threshold=threshold)
-    fn = build_fn(ns)
+    fn = build_fn(ns)          # 先把抽取的函数装进命名空间
+    env_selfcheck(ns)          # 再自检：还缺谁就一次说清，不要跑到一半 NameError
     asyncio.run(fn())
     return db, calls, logs
 
@@ -236,6 +346,20 @@ check("通报里的累计警告数字与数据库一致（都是 1）",
 check("通报里不再出现两个互相矛盾的警告次数（修复前会是 6 与 1 并存）",
       "**6**" not in msg, msg[:400])
 check("通报里没有残留占位符", "\x00" not in msg, repr(msg[:200]))
+# 未达阈值时，新的停流路径（临时封禁踢流）必须真的被执行到 —— 否则本套件只是
+# "碰巧没崩"，并没有覆盖真实路径；同时证明重置在这次 kick 落库之后依然是 1。
+check("未达阈值 → 真的走了临时封禁踢流（kick_until 已落库 + 已写 IsDisabled=True）",
+      calls["set_disabled"] == [("emby-abc", True)]
+      and any("kick_until" in w for w in calls["db_writes"]),
+      f"set_disabled={calls['set_disabled']} writes={calls['db_writes']}")
+# kick 路径的复验必须按 **UserId** 调度（不是按旧 session id）：解封后用户重连会
+# 生成新的 session id，按旧 id 查永远查不到 → 无论有没有重连都会报"已断开"（假证据）。
+check("未达阈值 → 复验按 UserId 调度，且 wait 晚于解封时刻（> hold_seconds）",
+      len(calls["kick_verify"]) == 1
+      and calls["kick_verify"][0][0] == "emby-abc"
+      and calls["kick_verify"][0][2] > 45
+      and calls["kick_verify"][0][3] == 3,
+      f"kick_verify={calls['kick_verify']}")
 
 print()
 print("════════ 2. 同类场景：I/O 期间管理员「➖ 警告-1」（5 → 4）════════")

@@ -38,7 +38,44 @@ class Open(BaseModel):
     open_us: int = 30
     all_user: int
     register_worker_count: int = 5
-    register_queue_limit: int = 100
+    # 等待队列长度：默认拉长到 300，让"排队"而不是"被拒"成为默认体验。
+    # 注意队列还有第二道上限：不能超过剩余席位（all_user - tem - 占位），
+    # 即不会超卖。见 register_queue.py 的 _max_waiting_queue_size_locked()。
+    register_queue_limit: int = 300
+    # ── 排队体验（bot/func_helper/register_queue.py）─────────────────────────
+    # ETA 用最近 N 个已完成注册任务的真实耗时做滑动平均，样本不足时文案给"约"。
+    register_queue_eta_window: int = 10             # 滑动平均窗口(个)
+    register_queue_eta_min_samples: int = 3         # 少于该样本数时不报精确 ETA
+    register_queue_warn_after_seconds: int = 120    # 等待超过该秒数补一条"仍在排队"提示
+    # ── 安全批量建号限流闸门（bot/func_helper/register_throttle.py）──────────
+    # 全部可选，缺失即用默认值。**必须在这里声明**：Open 没开 extra="allow"，
+    # pydantic v2 默认 extra="ignore"，未声明的键不但读不到，下次 save_config()
+    # 还会把它从 config.json 里静默抹掉。
+    #
+    # 默认值的取值思路（"开号又快 + 不会 OOM"）：
+    #   并发压到 1、请求之间留 400ms —— 建 1 个号 3 次请求 ≈ 1.2s，约 40~50 个/分钟；
+    #   分片 25 个 + 批间隔 10s —— 每号额外摊 0.4s，Emby 每 10 秒能喘一口气；
+    #   Emby 单次请求健康时只要 5~30ms，这个节奏对它几乎没有压力。
+    register_throttle_enabled: bool = True          # 总开关
+    register_batch_concurrency: int = 1             # 建号/批量 lane 并发上限
+    register_interactive_concurrency: int = 6       # 交互/巡检 lane 并发上限
+    register_max_workers: int = 2                   # register_worker_count 的上限
+    register_min_interval_ms: int = 400             # 批量 lane 请求最小间隔(ms)
+    register_interactive_min_interval_ms: int = 0   # 交互 lane 最小间隔(ms)
+    register_shard_size: int = 25                   # 每批账号数
+    register_batch_gap: float = 10.0                # 批间隔(秒)
+    register_breaker_failures: int = 5              # 连续失败熔断阈值
+    register_breaker_cooldown: float = 60.0         # 熔断暂停(秒)
+    register_request_timeout: float = 10.0          # 单请求超时(秒)，与原实现一致
+    register_retries: int = 2                       # 幂等请求重试次数(含首次)，原为 3
+    register_probe_timeout: float = 3.0             # 熔断期快速探测超时(秒)
+    register_alert_owner: bool = True               # 熔断时私聊 owner 告警
+    register_virtualfolders_ttl: float = 300.0      # 媒体库列表缓存 TTL(秒)
+    register_item_retries: int = 1                  # 批量单项失败后的指数退避重试次数
+    register_abort_on_breaker: bool = False         # 熔断时直接中止(而非等待冷却)
+    # GET /emby/Sessions 的 ActiveWithinSeconds：线上不带该参数要传 2.97MB/4037 条
+    # 僵尸 session（真正在播只有 7~8 条），带 300 只要 90KB/75 条。0=不加参数。
+    register_session_active_seconds: int = 300
     timing: int = 0
     tem: Optional[int] = 0
     # allow_code: StrictBool
