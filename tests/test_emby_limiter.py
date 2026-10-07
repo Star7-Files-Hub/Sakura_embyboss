@@ -286,9 +286,11 @@ async def test_B_breaker():
             H.eq("3 次失败请求都真的到了 _request", fail.calls, 3)
 
             before = fail.calls
+            deadline1 = t._BREAKER._open_until
             rem1 = t._BREAKER.remaining()
             results = [await batch_call(fail) for _ in range(5)]
             after = fail.calls
+            deadline2 = t._BREAKER._open_until
             rem2 = t._BREAKER.remaining()
             H.eq("冷却期内 5 次 batch 请求：真实 _request 调用次数增加 0", after - before, 0)
             H.check("冷却期内的结果全部是失败（快速失败）",
@@ -297,8 +299,13 @@ async def test_B_breaker():
             H.check("快速失败的 error 里带『熔断』字样",
                     all("熔断" in (r.error or "") for r in results),
                     f"error = {[r.error for r in results]}")
-            H.check("快速失败不会延长冷却时间（remaining 单调下降）", rem2 < rem1,
-                    f"remaining {rem1:.2f}s -> {rem2:.2f}s")
+            # ⚠️ 这里**不能**断言 rem2 < rem1：5 次快速失败只花几十微秒，
+            # 而虚拟机上的单调时钟粒度可能粗到几毫秒，两次读到的值会完全相等
+            # （CI 上就是这么红的：`remaining 1.00s -> 1.00s`）。
+            # 真正要守的不变量是「冷却截止时刻没有被推后」。
+            H.eq("快速失败不会推后冷却截止时刻（_open_until 不变）", deadline2, deadline1)
+            H.check("快速失败不会延长冷却时间（remaining 不增）", rem2 <= rem1,
+                    f"remaining {rem1:.4f}s -> {rem2:.4f}s")
 
         await asyncio.sleep(1.2)
         H.eq("冷却 1.0s 结束后 is_open() == False（自动恢复）", t._BREAKER.is_open(), False)
@@ -632,7 +639,7 @@ async def test_C_create_request_count():
     H.check("data=None → 返回 False（不抛到调用方）", res2 is False, f"实际 {res2!r}")
     H.check("此时不会调用 _delete_orphan_account（若 Emby 侧其实建了号就是孤儿）",
             deleted2 == [], f"{deleted2}")
-    note("说明：这不是本次改动引入的 —— HEAD 的 emby_create 在 "
+    note("说明：这不是本次改动引入的 —— 基准 的 emby_create 在 "
          "`user_id = result.data.get('Id')` 处同样会抛 AttributeError 被最外层 except 吞掉后 return False。"
          "属于既有边界，建议顺手在 data 为空时也走一次回滚。")
 
@@ -1474,12 +1481,17 @@ async def test_G_adversarial():
 
 # ══════════════════════════════════════════════════════════════════════════════
 # ══════════════════════════════════════════════════════════════════════════════
-# H 差分验证：HEAD 版 emby_create  vs  当前版 emby_create（甲/乙两支都跑）
-#    基准 = `git show HEAD:bot/func_helper/emby.py`（真代码，不是我的复述）
+# H 差分验证：改造前版 emby_create  vs  当前版 emby_create（甲/乙两支都跑）
+#
+# 基准是**钉死的一个提交**（BASE_COMMIT），不是 HEAD —— 这一点很关键：
+# 本次改动一旦提交，HEAD 里就有 _build_full_policy 了，再拿 HEAD 当基准
+# 等于「拿新代码跟自己比」，整个 H 段会静默变成永远通过的空测试。
+# 基准优先读仓库里的冻结副本 tests/fixtures/emby_baseline_<sha>.py（CI 是浅克隆，
+# 取不到历史提交），取不到时回退 `git show <sha>:bot/func_helper/emby.py`。
 # ══════════════════════════════════════════════════════════════════════════════
 
 # Emby `UserPolicy` 构造函数的默认值（本项目 create_policy 依赖的就是它们）。
-# 差分对比里 HEAD 与当前版用**同一套**建模，所以它不影响结论；
+# 差分对比里 基准 与当前版用**同一套**建模，所以它不影响结论；
 # 影响结论的只有 EnableAllFolders 的默认值（True），而这一点是由
 # create_policy() 故意不写这两个字段的事实反推得到的。
 EMBY_USER_POLICY_DEFAULTS = {
@@ -1517,23 +1529,51 @@ EMBY_USER_POLICY_DEFAULTS = {
 }
 
 
-def load_head_module():
-    """把 HEAD 的 emby.py 当独立模块加载（拿真代码当基准，不是我的复述）。"""
+# 改造前的最后一个提交（本次限流改造的父提交）。差分对照钉在这个 sha 上。
+BASE_COMMIT = "a587509"
+BASELINE_FIXTURE = ROOT / "tests" / "fixtures" / f"emby_baseline_{BASE_COMMIT}.py"
+
+
+def load_baseline_module():
+    """
+    把**改造前**的 emby.py 当独立模块加载（拿真代码当基准，不是我的复述）。
+
+    读取顺序（CI 是浅克隆，取不到历史提交，所以必须有冻结副本）：
+      1. tests/fixtures/emby_baseline_<BASE_COMMIT>.py  —— 冻结副本，byte 级等同原文件
+      2. `git show <BASE_COMMIT>:bot/func_helper/emby.py` —— 完整克隆时的真身
+    两个都拿不到就抛异常，让这一整段显式失败 —— 绝不允许静默退回 HEAD
+    （那会让「新旧对比」变成「新和新对比」，测试永远通过而毫无意义）。
+    """
     import subprocess
     import types
-    src = subprocess.check_output(
-        ["git", "show", "HEAD:bot/func_helper/emby.py"], cwd=str(ROOT)
-    ).decode("utf-8")
-    mod = types.ModuleType("head_emby_baseline")
-    mod.__file__ = "HEAD:bot/func_helper/emby.py"
-    sys.modules["head_emby_baseline"] = mod
-    exec(compile(src, "HEAD:bot/func_helper/emby.py", "exec"), mod.__dict__)
+
+    if BASELINE_FIXTURE.is_file():
+        src = BASELINE_FIXTURE.read_text(encoding="utf-8")
+        label = f"tests/fixtures/{BASELINE_FIXTURE.name}"
+    else:
+        label = f"{BASE_COMMIT}:bot/func_helper/emby.py"
+        try:
+            src = subprocess.check_output(
+                ["git", "show", f"{BASE_COMMIT}:bot/func_helper/emby.py"],
+                cwd=str(ROOT), stderr=subprocess.DEVNULL,
+            ).decode("utf-8")
+        except Exception as e:  # noqa: BLE001
+            raise RuntimeError(
+                f"取不到改造前的 emby.py 基准：既没有 {BASELINE_FIXTURE}，"
+                f"也 `git show {BASE_COMMIT}:bot/func_helper/emby.py` 失败（{e}）。"
+                "浅克隆下请保留冻结副本。"
+            ) from e
+
+    mod = types.ModuleType("baseline_emby")
+    mod.__file__ = label
+    sys.modules["baseline_emby"] = mod
+    exec(compile(src, label, "exec"), mod.__dict__)
     return mod
 
 
 class FakeEmbyServer:
     """
-    把 Emby 侧「存策略」的语义建模出来，用于比较 HEAD / 快路径的**最终生效值**。
+    把 Emby 侧「存策略」的语义建模出来，用于比较 基准 / 快路径的**最终生效值**。
 
     model="reset"：Emby 真实语义 —— body 反序列化成 UserPolicy 对象，
                    缺的字段回落成构造函数默认值；
@@ -1599,8 +1639,8 @@ def _norm_policy(p):
     return out
 
 
-async def _run_head(head_mod, server, name="差分用户"):
-    svc = head_mod.Embyservice.__new__(head_mod.Embyservice)
+async def _run_head(base_mod, server, name="差分用户"):
+    svc = base_mod.Embyservice.__new__(base_mod.Embyservice)
     svc._request = server.request
 
     async def fake_del(emby_id):
@@ -1625,17 +1665,20 @@ async def _run_current(server, libs, name="差分用户"):
 
 
 async def test_H_differential():
-    section("H0 加载 HEAD 基准（git show HEAD:bot/func_helper/emby.py）")
+    section(f"H0 加载改造前的基准（{BASE_COMMIT}，冻结副本或 git show）")
     try:
-        head_mod = load_head_module()
-        H.check("HEAD 版 emby.py 作为独立模块加载成功", True)
+        base_mod = load_baseline_module()
+        H.check("改造前 emby.py 作为独立模块加载成功", True)
     except Exception as e:
-        H.check("HEAD 版 emby.py 作为独立模块加载成功", False, f"{type(e).__name__}: {e}")
+        H.check("改造前 emby.py 作为独立模块加载成功", False, f"{type(e).__name__}: {e}")
         return
-    H.check("HEAD 版有 emby_create", hasattr(head_mod.Embyservice, "emby_create"))
-    H.check("HEAD 版有 hide_folders_by_names", hasattr(head_mod.Embyservice, "hide_folders_by_names"))
-    H.check("HEAD 版**没有** _build_full_policy（说明它确实是本次新加的）",
-            not hasattr(head_mod.Embyservice, "_build_full_policy"))
+    H.check("基准版有 emby_create", hasattr(base_mod.Embyservice, "emby_create"))
+    H.check("基准版有 hide_folders_by_names", hasattr(base_mod.Embyservice, "hide_folders_by_names"))
+    # 这条是「基准没被钉错」的哨兵：基准里必须**没有** _build_full_policy。
+    # 一旦有人把基准指回 HEAD（也就是指回新代码），这里立刻变红，
+    # 否则整个 H 段会退化成「新代码 vs 新代码」的永远通过。
+    H.check("基准版**没有** _build_full_policy（说明基准确实钉在改造前）",
+            not hasattr(base_mod.Embyservice, "_build_full_policy"))
 
     cases = [
         ("分支甲（线上真实库名，一个都对不上）", REAL_ONLINE_LIBS, 6),
@@ -1648,31 +1691,31 @@ async def test_H_differential():
     ]
 
     for model in ("reset", "merge"):
-        for label, libs, expect_head_calls in cases:
+        for label, libs, expect_base_calls in cases:
             section(f"H1 [{model}] {label}")
             srv_h = FakeEmbyServer(libs, model=model)
             srv_c = FakeEmbyServer(libs, model=model)
-            res_h = await _run_head(head_mod, srv_h)
+            res_h = await _run_head(base_mod, srv_h)
             res_c = await _run_current(srv_c, libs)
 
-            note(f"HEAD   请求数={len(srv_h.calls)} 路径={[e for _, e in srv_h.calls]}")
+            note(f"基准   请求数={len(srv_h.calls)} 路径={[e for _, e in srv_h.calls]}")
             note(f"快路径 请求数={len(srv_c.calls)} 路径={[e for _, e in srv_c.calls]}")
             ph = srv_h.users[srv_h.user_id]
             pc = srv_c.users[srv_c.user_id]
-            note(f"HEAD   最终 EnableAllFolders={ph.get('EnableAllFolders')!r} "
+            note(f"基准   最终 EnableAllFolders={ph.get('EnableAllFolders')!r} "
                  f"EnabledFolders={ph.get('EnabledFolders')!r}")
             note(f"快路径 最终 EnableAllFolders={pc.get('EnableAllFolders')!r} "
                  f"EnabledFolders={pc.get('EnabledFolders')!r}")
-            note(f"HEAD   可见库={sorted(srv_h.visible_names())}")
+            note(f"基准   可见库={sorted(srv_h.visible_names())}")
             note(f"快路径 可见库={sorted(srv_c.visible_names())}")
-            note(f"HEAD   写入的 Policy 次数={len(srv_h.policy_bodies)} "
+            note(f"基准   写入的 Policy 次数={len(srv_h.policy_bodies)} "
                  f"快路径={len(srv_c.policy_bodies)}")
 
             H.check("两边都建号成功",
                     isinstance(res_h, tuple) and isinstance(res_c, tuple),
-                    f"HEAD={res_h!r} 快路径={res_c!r}")
-            H.eq(f"HEAD 请求数 == {expect_head_calls}（基线，Lead 给的是 {expect_head_calls}）",
-                 len(srv_h.calls), expect_head_calls)
+                    f"基准={res_h!r} 快路径={res_c!r}")
+            H.eq(f"基准 请求数 == {expect_base_calls}（基线，Lead 给的是 {expect_base_calls}）",
+                 len(srv_h.calls), expect_base_calls)
             H.eq("快路径请求数 == 3", len(srv_c.calls), 3)
             H.eq("EnableAllFolders 最终值一致",
                  pc.get("EnableAllFolders"), ph.get("EnableAllFolders"))
@@ -1682,7 +1725,7 @@ async def test_H_differential():
                  sorted(pc.get("BlockedMediaFolders") or []),
                  sorted(ph.get("BlockedMediaFolders") or []))
             if sorted(pc.get("BlockedMediaFolders") or []) != list(pc.get("BlockedMediaFolders") or []):
-                note("（BlockedMediaFolders 的**列表顺序**两边不同：HEAD 走 list(set(...)) 的哈希序，"
+                note("（BlockedMediaFolders 的**列表顺序**两边不同：基准 走 list(set(...)) 的哈希序，"
                      "快路径是确定序；集合完全相同，Emby 不关心顺序）")
             H.eq("【核心】可见媒体库集合逐字一致", srv_c.visible_names(), srv_h.visible_names())
             H.eq("整份最终策略一致（Blocked 归一化后）", _norm_policy(pc), _norm_policy(ph))

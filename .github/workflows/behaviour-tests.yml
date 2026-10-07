@@ -2,6 +2,9 @@ name: Behaviour tests
 
 # 这些测试用 AST 从真实源文件里抽出函数来执行（只桩外部依赖），
 # 不需要安装 pyrogram / SQLAlchemy，纯标准库即可跑。
+# 例外：test_emby_limiter 测的是真实模块（闸门/熔断/队列/建号快路径），
+# 必须真正 import bot，所以它单独装 requirements.txt，且**只在 3.10 上跑**
+# —— 见下方 matrix.exclude 的说明。
 on:
   push:
   pull_request:
@@ -33,6 +36,16 @@ jobs:
           - test_backup_sends_config
           - test_backup_recipient
           - test_emby_limiter
+        # test_emby_limiter 要装完整 requirements.txt，而其中两个包在 3.12 上
+        # **没有 wheel**，只能源码编译：
+        #   uvloop~=0.17.0 —— 只发到 cp311，3.12 编译直接失败（实测 CI 红在这里）
+        #   TgCrypto~=1.2.5 —— 只发到 cp311，是 Pyrogram 的硬依赖，3.12 得现编
+        # 生产镜像用的是 python:3.10.11，所以这个集成套件只在 3.10 上跑；
+        # 其它 10 个套件（纯 stdlib + pydantic）仍然 3.10 / 3.12 双版本。
+        # 刻意用 exclude 而不是 if 跳过：不留「跑了个寂寞但显示绿」的空 job。
+        exclude:
+          - python-version: "3.12"
+            suite: test_emby_limiter
     steps:
       - uses: actions/checkout@v4
 
@@ -50,6 +63,8 @@ jobs:
       # 建号快路径，必须真正 `import bot` —— 于是需要运行期依赖 + 一份 config.json
       # （config.json 被 .gitignore 排除，CI 里要用模板现造一份）。
       # 刻意**不**给它静默 SKIP 的后门：跑不了就让 CI 红，别再造一次「徽章全绿但没测」。
+      # 3.10 上 requirements.txt 全部有 wheel（TgCrypto / uvloop 都发到 cp310），
+      # 所以这里直接装即可；3.12 上这两个包没有 wheel，已在 matrix.exclude 里排除。
       - name: 为 test_emby_limiter 准备运行期依赖与 config.json
         if: matrix.suite == 'test_emby_limiter'
         run: |
