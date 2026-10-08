@@ -315,15 +315,17 @@ def make_env(*, is_disabled=False, persist_ok=True, disable_ok=True,
     async def warn_user(tg_id, text):
         ev["warn"].append((tg_id, text))
 
-    def _schedule_stop_verify(session_ids, user_name, wait=None, emby_user_id=None):
+    def _schedule_stop_verify(session_ids, user_name, wait=None, emby_user_id=None,
+                              announce_group=True):
         # task-45：回退路径也必须带上 emby_user_id（否则又退回"按旧 session id 复验"）
-        ev["sched"].append((list(session_ids), user_name, wait, emby_user_id))
+        ev["sched"].append((list(session_ids), user_name, wait, emby_user_id, announce_group))
 
     # 2026-10-06 二轮：kick 路径改用**按 UserId** 的复验 `_verify_kick_followup`，
     # 调度函数 `_schedule_kick_verify` 是真实源码（已抽取），这里只把「复验本体」
     # 换成记录替身 —— 这样既验证了真实调度函数把参数原样透传，又不会真等 60 秒。
-    async def _verify_kick_followup(emby_user_id, user_name, wait, stream_count):
-        ev["kick_sched"].append((emby_user_id, user_name, wait, stream_count))
+    async def _verify_kick_followup(emby_user_id, user_name, wait, stream_count,
+                                   announce_group=True):
+        ev["kick_sched"].append((emby_user_id, user_name, wait, stream_count, announce_group))
 
     ns["send_group_announcement"] = send_group_announcement
     ns["warn_user"] = warn_user
@@ -740,15 +742,15 @@ asyncio.run(ns["check_concurrent_play_limit"]())
 check("15a 确实走了 kick 路径（写了 IsDisabled=True）",
       (EMBY, True) in ev["set_disabled"], str(ev["set_disabled"]))
 check("15b 复验已调度", len(ev["kick_sched"]) == 1, str(ev["kick_sched"]))
-waits = [w for (_u, _n, w, _c) in ev["kick_sched"]]
+waits = [entry[2] for entry in ev["kick_sched"]]
 check("15c wait 显式给出且严格大于 hold_seconds（否则复查到的是仍被禁用的假象）",
       bool(waits) and all(w is not None and w > HOLD for w in waits), f"wait={waits} hold={HOLD}")
 # 2026-10-06 二轮：复验从「按旧 session id」改成「按 UserId」——因为解封后重连会
 # 生成新的 session id，按旧 id 查必然查不到（无论有没有重连都报"已断开"，是假证据）。
-check("15d 复验按 UserId 调度，带上流数，且**不再**走按旧 session id 的复验",
+check("15d 复验按 UserId 调度，带上流数，并传递阶梯通知档位",
       bool(ev["kick_sched"])
       and ev["kick_sched"][0][0] == EMBY and ev["kick_sched"][0][3] == 3
-      and ev["sched"] == [],
+      and ev["kick_sched"][0][4] is False and ev["sched"] == [],
       f"kick_sched={ev['kick_sched']} 旧按id={ev['sched']}")
 
 # 15e：会话连 Id 都拿不到时，**仍然**要调度复验 —— 这正是按 UserId 判定的意义：
@@ -781,8 +783,9 @@ check("15f 巡检抛异常 → 记录 error 但本轮检测照常执行（踢流
 # "按旧 session id 复验"，客户端重连就会报假成功。
 ns, ev = make_env(warn_count=0, threshold=3, streams=2, limit=1, is_disabled=True)
 asyncio.run(ns["check_concurrent_play_limit"]())
-check("15g 踢流被拒 → 回退调度 _schedule_stop_verify 且带上 emby_user_id",
-      len(ev["sched"]) == 1 and ev["sched"][0][3] == EMBY and ev["kick_sched"] == [],
+check("15g 踢流被拒 → 回退调度带 emby_user_id 且首两次不发群复验",
+      len(ev["sched"]) == 1 and ev["sched"][0][3] == EMBY
+      and ev["sched"][0][4] is False and ev["kick_sched"] == [],
       f"sched={ev['sched']} kick_sched={ev['kick_sched']}")
 
 print()
@@ -997,10 +1000,15 @@ check("20e 名字缺失时退回用 tg_id 当标签（不是 None 文本）",
 ns, ev = make_env(warn_count=0, threshold=3, streams=3, limit=2, is_disabled=False)
 asyncio.run(ns["check_concurrent_play_limit"]())
 _first = ev["announce"][0] if ev["announce"] else ""
-check("20f 群通报里含触发者的文本提及（@ 到本人）",
-      f"tg://user?id={TG}" in _first and "🔔 触发者" in _first, _first[:200] or "没有通报")
-check("20g 群通报里带上 TG 号（可人工核对是谁）",
-      f"（TG: `{TG}`）" in _first, _first[:200])
+check("20f 第 1 次只发私聊，不发群消息", ev["announce"] == [] and len(ev["warn"]) == 1,
+      f"群={ev['announce']} 私聊={ev['warn']}")
+
+ns3rd, ev3rd = make_env(warn_count=2, threshold=3, streams=3, limit=2, is_disabled=False)
+asyncio.run(ns3rd["check_concurrent_play_limit"]())
+_first3 = ev3rd["announce"][0] if ev3rd["announce"] else ""
+check("20g 第 3 次群通报含触发者文本提及和 TG 号",
+      f"tg://user?id={TG}" in _first3 and "🔔 触发者" in _first3
+      and f"（TG: `{TG}`）" in _first3, _first3[:240] or "没有通报")
 
 # 没绑定 TG 的账号：@ 不了，必须**如实写明**，而不是静默留空
 _rows = {None: Row(tg=None, embyid=EMBY, name="toe", lv="b", concurrent_warn_count=0)}
@@ -1008,17 +1016,15 @@ ns2, ev2 = make_env(warn_count=0, threshold=3, streams=3, limit=2, is_disabled=F
                     rows=_rows)
 asyncio.run(ns2["check_concurrent_play_limit"]())
 _first2 = ev2["announce"][0] if ev2["announce"] else ""
-check("20h 无 tg_id → 通报写明「该账号未绑定 TG，无法 @ 通知」",
-      "未绑定 TG" in _first2, _first2[:200] or "没有通报")
-check("20i 无 tg_id → 通报里绝不出现 tg://user?id= 死链",
-      "tg://user?id=" not in _first2, _first2[:200])
+check("20h 第 1 次未绑定 TG 仍只走私聊路径，不发群消息",
+      ev2["announce"] == [] and ev2["warn"] == [], f"群={ev2['announce']} 私聊={ev2['warn']}")
 
 # 时长：用户明确要求 3 分钟。这条**故意**硬编码 180 —— 它是需求本身，
 # 改需求时就必须显式改这里；其余地方一律从 _KICK_HOLD_SECONDS 推导。
 check("20j 临时封禁时长 = 180 秒（用户明确要求 3 分钟）", HOLD == 180, f"HOLD={HOLD}")
 ns3, ev3 = make_env(warn_count=0, threshold=3, streams=3, limit=2, is_disabled=False)
 asyncio.run(ns3["check_concurrent_play_limit"]())
-_waits3 = [w for (_u, _n, w, _c) in ev3["kick_sched"]]
+_waits3 = [entry[2] for entry in ev3["kick_sched"]]
 check("20k kick 路径的复验 wait 严格大于 hold_seconds（HOLD=%d 秒）" % HOLD,
       bool(_waits3) and all(w is not None and w > HOLD for w in _waits3),
       f"wait={_waits3} HOLD={HOLD}")

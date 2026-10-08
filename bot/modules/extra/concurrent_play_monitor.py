@@ -222,7 +222,8 @@ async def _sessions_still_playing(session_ids) -> set:
     return still
 
 
-async def _verify_stop_followup(session_ids, user_name, wait: int = None, emby_user_id=None):
+async def _verify_stop_followup(session_ids, user_name, wait: int = None, emby_user_id=None,
+                                announce_group: bool = True):
     """
     延迟复验：确认这些会话是否**真的**断流，并把实测结果补发到群里。
 
@@ -246,22 +247,25 @@ async def _verify_stop_followup(session_ids, user_name, wait: int = None, emby_u
         if emby_user_id:
             playing = await _user_sessions_playing(emby_user_id)
             if playing is None:
-                await send_group_announcement(
+                await _announce_group_if_enabled(
                     f"🔎 **终止复验**\n用户: `{user_name}`\n"
-                    f"⚠️ 无法获取会话状态，**未能确认**是否已停止，请到 Emby 活动页核对。"
+                    f"⚠️ 无法获取会话状态，**未能确认**是否已停止，请到 Emby 活动页核对。",
+                    announce_group,
                 )
                 LOGGER.warning(f"终止复验: user={user_name}, 结果=无法确认")
                 return
             if playing == 0:
-                await send_group_announcement(
+                await _announce_group_if_enabled(
                     f"🔎 **终止复验**\n用户: `{user_name}`\n"
-                    f"✅ 该用户**当前没有任何播放流**（本轮已断开 {total} 个，未重连）。"
+                    f"✅ 该用户**当前没有任何播放流**（本轮已断开 {total} 个，未重连）。",
+                    announce_group,
                 )
             else:
-                await send_group_announcement(
+                await _announce_group_if_enabled(
                     f"🔎 **终止复验**\n用户: `{user_name}`\n"
                     f"⚠️ 该用户**仍有 {playing} 个流在播放**（本轮下发停止指令 {total} 个）"
-                    f"—— 停止指令未能生效，请手动处理。"
+                    f"—— 停止指令未能生效，请手动处理。",
+                    announce_group,
                 )
             LOGGER.info(
                 f"终止复验: user={user_name}, 按用户复验, 仍在播放={playing}, 等待={wait}s"
@@ -272,25 +276,28 @@ async def _verify_stop_followup(session_ids, user_name, wait: int = None, emby_u
         still = await _sessions_still_playing(set(session_ids))
 
         if still is None:
-            await send_group_announcement(
+            await _announce_group_if_enabled(
                 f"🔎 **终止复验**\n用户: `{user_name}`\n"
-                f"⚠️ 无法获取会话状态，**未能确认**是否已停止，请到 Emby 活动页核对。"
+                f"⚠️ 无法获取会话状态，**未能确认**是否已停止，请到 Emby 活动页核对。",
+                announce_group,
             )
             LOGGER.warning(f"终止复验: user={user_name}, 结果=无法确认")
             return
 
         stopped = total - len(still)
         if not still:
-            await send_group_announcement(
+            await _announce_group_if_enabled(
                 f"🔎 **终止复验**\n用户: `{user_name}`\n"
                 f"✅ 原会话已全部断开: **{stopped}/{total}** 个。\n"
-                f"⚠️ 本次只能按会话 ID 复验，**若他在此期间重连则会漏判**，请到 Emby 活动页核对。"
+                f"⚠️ 本次只能按会话 ID 复验，**若他在此期间重连则会漏判**，请到 Emby 活动页核对。",
+                announce_group,
             )
         else:
-            await send_group_announcement(
+            await _announce_group_if_enabled(
                 f"🔎 **终止复验**\n用户: `{user_name}`\n"
                 f"⚠️ 原会话 {total} 个中仍有 **{len(still)}** 个在播放（{wait} 秒后）\n"
-                f"请手动处理仍在播放的会话。"
+                f"请手动处理仍在播放的会话。",
+                announce_group,
             )
         LOGGER.info(
             f"终止复验: user={user_name}, 按会话 ID 复验, 已断开={stopped}, "
@@ -300,10 +307,11 @@ async def _verify_stop_followup(session_ids, user_name, wait: int = None, emby_u
         LOGGER.error(f"终止复验失败: user={user_name}, error={type(e).__name__}: {e}")
 
 
-def _schedule_stop_verify(session_ids, user_name, wait: int = None, emby_user_id=None):
+def _schedule_stop_verify(session_ids, user_name, wait: int = None, emby_user_id=None,
+                          announce_group: bool = True):
     """启动异步复验任务，并持有强引用避免被 GC 回收。"""
     task = asyncio.create_task(
-        _verify_stop_followup(session_ids, user_name, wait, emby_user_id)
+        _verify_stop_followup(session_ids, user_name, wait, emby_user_id, announce_group)
     )
     _VERIFY_TASKS.add(task)
     task.add_done_callback(_VERIFY_TASKS.discard)
@@ -340,7 +348,8 @@ async def _user_sessions_playing(emby_user_id: str):
     )
 
 
-async def _verify_kick_followup(emby_user_id: str, user_name: str, wait: int, stream_count: int):
+async def _verify_kick_followup(emby_user_id: str, user_name: str, wait: int, stream_count: int,
+                               announce_group: bool = True):
     """
     「临时封禁踢流」的延迟复验：解封之后**按 UserId** 重新统计该用户还有几个流。
 
@@ -380,25 +389,28 @@ async def _verify_kick_followup(emby_user_id: str, user_name: str, wait: int, st
         # 【第二步】账号确实已解封了，现在谈流才有意义
         playing = await _user_sessions_playing(emby_user_id)
         if playing is None:
-            await send_group_announcement(
+            await _announce_group_if_enabled(
                 f"🔎 **踢流复验**\n用户: `{user_name}`\n"
                 f"✅ 账号已解封；但⚠️ 无法获取会话状态，**未能确认**是否已停止，"
-                f"请到 Emby 活动页核对。"
+                f"请到 Emby 活动页核对。",
+                announce_group,
             )
             LOGGER.warning(f"踢流复验: user={user_name}, 结果=已解封但无法确认流状态")
             return
 
         if playing == 0:
-            await send_group_announcement(
+            await _announce_group_if_enabled(
                 f"🔎 **踢流复验**\n用户: `{user_name}`\n"
                 f"✅ 账号已解封，该用户**当前没有任何播放流**"
-                f"（原有 {stream_count} 个已断开，未重连）。"
+                f"（原有 {stream_count} 个已断开，未重连）。",
+                announce_group,
             )
         else:
-            await send_group_announcement(
+            await _announce_group_if_enabled(
                 f"🔎 **踢流复验**\n用户: `{user_name}`\n"
                 f"⚠️ 账号已解封，但该用户**仍有 {playing} 个流在播放**"
-                f"（原有 {stream_count} 个）—— 很可能是解封后重连，请手动处理。"
+                f"（原有 {stream_count} 个）—— 很可能是解封后重连，请手动处理。",
+                announce_group,
             )
         LOGGER.info(
             f"踢流复验: user={user_name}, 解封后仍在播放={playing}, "
@@ -408,10 +420,11 @@ async def _verify_kick_followup(emby_user_id: str, user_name: str, wait: int, st
         LOGGER.error(f"踢流复验失败: user={user_name}, error={type(e).__name__}: {e}")
 
 
-def _schedule_kick_verify(emby_user_id: str, user_name: str, wait: int, stream_count: int):
+def _schedule_kick_verify(emby_user_id: str, user_name: str, wait: int, stream_count: int,
+                          announce_group: bool = True):
     """启动踢流复验任务（按 UserId 判定），并持有强引用避免被 GC 回收。"""
     task = asyncio.create_task(
-        _verify_kick_followup(emby_user_id, user_name, wait, stream_count)
+        _verify_kick_followup(emby_user_id, user_name, wait, stream_count, announce_group)
     )
     _VERIFY_TASKS.add(task)
     task.add_done_callback(_VERIFY_TASKS.discard)
@@ -711,6 +724,12 @@ async def send_group_announcement(text: str):
         LOGGER.error(f"群内通报发送失败: {e}")
 
 
+async def _announce_group_if_enabled(text: str, enabled: bool):
+    """按本次违规计数阶梯决定是否发送普通群内复验结果。"""
+    if enabled:
+        await send_group_announcement(text)
+
+
 async def warn_user(tg_id: int, text: str):
     """
     向用户发送警告消息
@@ -927,6 +946,10 @@ async def check_concurrent_play_limit():
         if tg_id:
             await _sync_kk_panels(tg_id)
 
+        # 第 1、2 次只私聊用户；第 3 次起同时在群内通报。该值基于刚持久化的
+        # new_warn_count，因此跨重启仍按数据库中的累计次数继续阶梯判断。
+        announce_group = new_warn_count >= 3
+
         # ── 第二步：真正停流 ──
         #
         # 这台服务器上唯一由服务端自己执行、真正能停流的杠杆，就是把用户策略的
@@ -979,12 +1002,14 @@ async def check_concurrent_play_limit():
                 f"您的账号当前有 **{stream_count}** 个播放流，超出限制 **{user_limit}** 个。\n"
                 f"{enforce_line}\n"
                 f"警告次数: **{new_warn_count}** / **{warn_threshold}**\n\n"
-                f"⚠️ 超过 {warn_threshold} 次将自动封禁账号！"
+                + (f"✅ 已达 {warn_threshold} 次上限，账号已被封禁。"
+                   if banned else f"⚠️ 超过 {warn_threshold} 次将自动封禁账号！")
             )
             await warn_user(tg_id, user_warn_msg)
 
-        # 群内通报
-        await send_group_announcement(violation_msg)
+        # 阶梯式群通报：第 1、2 次仅私聊；第 3 次及以后保留原群通报（含 @ 触发者）。
+        if announce_group:
+            await send_group_announcement(violation_msg)
 
         # 延迟复验：把**实测**的断开数量补发到群里，绝不在这里当场宣称"已终止"。
         #
@@ -996,11 +1021,13 @@ async def check_concurrent_play_limit():
         # 等待时间也必须**晚于还原时刻**，否则是在"还禁着"的时候复查。
         if kicked:
             _schedule_kick_verify(
-                emby_user_id, user_name, kick["hold_seconds"] + 15, stream_count
+                emby_user_id, user_name, kick["hold_seconds"] + 15, stream_count,
+                announce_group=announce_group,
             )
         elif accepted_ids:
             _schedule_stop_verify(
-                accepted_ids, user_name, emby_user_id=emby_user_id
+                accepted_ids, user_name, emby_user_id=emby_user_id,
+                announce_group=announce_group,
             )
 
         LOGGER.info(

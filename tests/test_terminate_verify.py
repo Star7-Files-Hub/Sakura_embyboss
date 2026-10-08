@@ -32,6 +32,9 @@ class Res:
     def __init__(self, ok, data=None, error=None):
         self.success, self.data, self.error = ok, data, error
 
+async def _false(emby_id=None):
+    return False
+
 GROUP_MSGS = []       # send_group_announcement 捕获
 DM_MSGS = []          # warn_user 捕获
 API_CALLS = []        # (method, endpoint)，endpoint 已归一化掉 query
@@ -39,8 +42,11 @@ RAW_ENDPOINTS = []    # endpoint 原样保留（用来守住 ?ActiveWithinSecond
 SESSIONS_LIST_RAW = []  # 只记"会话列表"这个端点，且全程不清空（见文件末尾 6a~6c）
 SESSIONS_QUEUE = []   # 每次 GET /emby/Sessions 依次返回的会话列表
 EVENTS = []           # 副作用顺序：("persist", 字段) / ("disable", True|False)
-VERIFY_SCHED = []     # _schedule_stop_verify 收到的 (ids, user_name, wait)
-KICK_SCHED = []       # _schedule_kick_verify 收到的 (emby_user_id, user_name, wait, stream_count)
+VERIFY_SCHED = []     # _schedule_stop_verify 收到的参数
+KICK_SCHED = []       # _schedule_kick_verify 收到的参数
+
+DISABLED_STATE = False
+
 
 def make_emby():
     class E:
@@ -61,16 +67,14 @@ def make_emby():
         async def emby_change_policy(self, emby_id, admin=False, disable=False):
             return True
         async def is_user_disabled(self, emby_id):
-            # 用户本来是启用的 → 允许走新的「临时封禁踢流」路径
-            return False
+            return DISABLED_STATE
         async def set_user_disabled(self, emby_id, disabled, before_write=None):
-            # 真实实现把「落库」放在**锁内、POST 之前**（before_write 回调），
-            # 顺序必须是 persist → disable，替身也照这个顺序记。
-            if before_write is not None:
-                if not await before_write():
-                    EVENTS.append(("before_write_failed", disabled))
-                    return False
+            if before_write is not None and not await before_write():
+                EVENTS.append(("before_write_failed", disabled))
+                return False
             EVENTS.append(("disable", disabled))
+            global DISABLED_STATE
+            DISABLED_STATE = disabled
             return True
     return E()
 
@@ -149,27 +153,25 @@ cpm.send_group_announcement = cap_group
 cpm.warn_user = cap_dm
 cpm._STOP_VERIFY_FOLLOWUP = 0     # 测试里不真等 30 秒
 
-# 复验调度：走「临时封禁踢流」路径时，真实实现刻意把 wait 设成
-# `hold_seconds + 15`（=60 秒，晚于解封），测试里不可能真等 60 秒。
-# 这里换成「记录 wait + 立刻以 wait=0 跑一遍真实复验」的替身：既保留
-# 「首报 + 复验」两条消息的端到端行为，又能断言调度时机的语义（见测试 4）。
-def cap_schedule(session_ids, user_name, wait=None, emby_user_id=None):
-    VERIFY_SCHED.append((list(session_ids), user_name, wait, emby_user_id))
+# 复验调度替身保留参数，并以 wait=0 执行真实复验；临时踢流调度另由 test_temp_kick 覆盖。
+def cap_schedule(session_ids, user_name, wait=None, emby_user_id=None, announce_group=True):
+    VERIFY_SCHED.append((list(session_ids), user_name, wait, emby_user_id, announce_group))
     # 记录之后把**真实**复验以 wait=0 跑一遍：这样"回退路径是否按 UserId 复验"
     # 有端到端证据，而不是只看调度参数。
-    asyncio.ensure_future(
-        cpm._verify_stop_followup(list(session_ids), user_name, wait=0, emby_user_id=emby_user_id)
+    return asyncio.ensure_future(
+        cpm._verify_stop_followup(session_ids, user_name, wait=0, emby_user_id=emby_user_id,
+                                  announce_group=announce_group)
     )
-    return asyncio.ensure_future(cpm._verify_stop_followup(session_ids, user_name, wait=0))
 cpm._schedule_stop_verify = cap_schedule
 
 # 2026-10-06 二轮：kick 路径改用**按 UserId** 的复验（`_verify_kick_followup`），
 # 不再用按旧 session id 的 `_verify_stop_followup`。同样换成「记录参数 + 立刻以
 # wait=0 跑一遍真实复验」的替身，这样端到端仍然会产出「首报 + 复验」两条消息。
-def cap_kick_schedule(emby_user_id, user_name, wait, stream_count):
-    KICK_SCHED.append((emby_user_id, user_name, wait, stream_count))
+def cap_kick_schedule(emby_user_id, user_name, wait, stream_count, announce_group=True):
+    KICK_SCHED.append((emby_user_id, user_name, wait, stream_count, announce_group))
     return asyncio.ensure_future(
-        cpm._verify_kick_followup(emby_user_id, user_name, wait=0, stream_count=stream_count)
+        cpm._verify_kick_followup(emby_user_id, user_name, wait=0, stream_count=stream_count,
+                                  announce_group=announce_group)
     )
 cpm._schedule_kick_verify = cap_kick_schedule
 
@@ -319,28 +321,33 @@ print("=" * 70)
 print("测试 4：端到端 —— check_concurrent_play_limit 的文案必须诚实")
 print("=" * 70)
 
-# 造一个超限用户：数据库里能查到、非管理员、非白名单
+# 造一个超限用户：初始累计 2，本轮应记录为第 3 次
 class Row:
     tg = 1156115326
     embyid = "f58ac4d2b82341b492e7d5309a024b39"
     name = "toe"
     lv = "b"
-    concurrent_warn_count = 0
+    concurrent_warn_count = 2
 cpm.sql_get_emby = lambda **k: Row()
 def _sql_update(where, **kw):
     # 真实实现返回 bool：kick_user_streams 用它判断「落库是否成功」，
     # 返回 None 会被当成落库失败而拒绝禁用，所以这里必须如实返回 True。
     EVENTS.append(("persist", tuple(sorted(kw))))
+    for key, value in kw.items():
+        setattr(Row, key, value)
     return True
 cpm.sql_update_emby = _sql_update
 cpm.judge_admins = lambda uid: False
 
 async def main():
     GROUP_MSGS.clear(); DM_MSGS.clear(); SESSIONS_QUEUE.clear(); API_CALLS.clear()
+    EVENTS.clear(); VERIFY_SCHED.clear(); KICK_SCHED.clear()
     # 第 1 次 GET /emby/Sessions（检测用）：两个流
     SESSIONS_QUEUE.append(Res(True, [sess("s1", "剧A"), sess("s2", "剧B")]))
     # 第 2 次（复验用）：都还在播 → 模拟"204 但客户端没断"
     SESSIONS_QUEUE.append(Res(True, [sess("s1"), sess("s2")]))
+    global DISABLED_STATE
+    DISABLED_STATE = False
     await cpm.check_concurrent_play_limit()
     await asyncio.sleep(0.2)      # 让后台复验任务跑完
 
@@ -350,69 +357,55 @@ for m in GROUP_MSGS: print("   " + m.replace("\n", "\n   "))
 print("  ── 私信内容 ──")
 for m in DM_MSGS: print("   " + m.replace("\n", "\n   "))
 
-check("群通报共 2 条（首报 + 复验）", len(GROUP_MSGS) == 2, f"实际 {len(GROUP_MSGS)}")
-first = GROUP_MSGS[0] if GROUP_MSGS else ""
-check("首报用『已下发停止指令』而非『已终止』", "已下发停止指令: 2 个流" in first)
-check("首报不再出现『已终止:』", "已终止:" not in first)
-# 旧断言断言的是被删掉的旧文案（「复验结果将在 30 秒后补发」）。新实现刻意**不再**
-# 承诺"30 秒后复验"：走临时封禁踢流时用户要到 hold_seconds 之后才解封，30 秒时
-# 他其实"还禁着"，那时看到的"已断开"证明不了解封后没重连。所以这里改断言**语义**：
-#   ① 说清实际做了什么（已下发指令 + 临时禁用踢流）；② 不谎称已终止/已断开；
-#   ③ 复验调度时间必须晚于解封时刻（这才是"复验有意义"的前提）。
-check("首报点明『已下发停止指令』且说明本服务器客户端通常不支持（不夸大效果）",
-      "已下发停止指令" in first and "通常无效" in first, first[:400])
-check("首报说明实际动作是『临时禁用该账号』且到期自动解封（诚实交代代价与恢复）",
-      "临时禁用" in first and "到期自动解封" in first, first[:400])
-check("首报不谎称流已被终止/已断开",
-      not any(w in first for w in ("已终止", "已被强制终止", "已断开")), first[:400])
-check("首报 @ 到触发者本人（文本提及，不依赖 username）",
-      "tg://user?id=1156115326" in first and "🔔 触发者" in first, first[:240])
-check("首报带上 TG 号便于人工核对", "（TG: `1156115326`）" in first, first[:240])
-kick_sched = list(KICK_SCHED)
-# 时长从源码常量推导，不硬编码 45/180（下次调整需求时这里不该再红一片）
-HOLD = cpm._KICK_HOLD_SECONDS
-check(f"复验按 UserId 调度（不是按旧 session id），且 wait 晚于解封时刻（> {HOLD}s）",
-      len(kick_sched) == 1
-      and kick_sched[0][0] == "f58ac4d2b82341b492e7d5309a024b39"
-      and kick_sched[0][2] > HOLD and kick_sched[0][3] == 2
-      and VERIFY_SCHED == [],
-      f"kick_sched={kick_sched} 旧按id调度={VERIFY_SCHED}")
-kick_events = [e for e in EVENTS
-               if e[0] == "disable" or (e[0] == "persist" and "kick_until" in e[1])]
-check("落库 kick_until 发生在写 IsDisabled=True 之前（顺序不可颠倒）",
-      kick_events == [("persist", ("kick_until",)), ("disable", True)], f"{EVENTS}")
+check("第 3 次群聊发送首报和复验", len(GROUP_MSGS) == 2, f"实际 {len(GROUP_MSGS)}")
+first_group = GROUP_MSGS[0] if GROUP_MSGS else ""
+first = DM_MSGS[0] if DM_MSGS else ""
+check("第 3 次私聊包含播放限制警告与警告次数 3/3",
+      "播放限制警告" in first and "警告次数: **3** / **3**" in first, first[:400])
+check("第 3 次群首报保留原有通知文案", "同时播放限制警告" in first_group)
+check("第 3 次群首报含触发者 @ 和 TG ID", "tg://user?id=1156115326" in first_group
+      and "TG: `1156115326`" in first_group)
+check("第 3 次群首报包含 Emby ID 与累计警告", "f58ac4d2b82341b492e7d5309a024b39" in first_group
+      and "累计警告: **3** / **3** 次" in first_group)
+check("第 3 次复验按档位发送群消息", len(KICK_SCHED) == 0
+      and len(VERIFY_SCHED) == 1 and VERIFY_SCHED[0][4] is True,
+      f"kick={KICK_SCHED} stop={VERIFY_SCHED}")
+check("第 3 次封禁路径清理已有 kick_until", any(kind == "persist" and data == ("kick_until",) for kind, data in EVENTS), str(EVENTS))
 second = GROUP_MSGS[1] if len(GROUP_MSGS) > 1 else ""
-check("复验报实测结果：仍有 2 个流在播放（不是 0、也不说已断开）",
-      "仍有 2 个流在播放" in second, second[:160])
-check("复验指出很可能是解封后重连、要求手动处理",
-      "重连" in second and "手动处理" in second, second[:160])
+check("复验报实测结果：仍有 2 个流在播放并要求手动处理",
+      "仍有 2 个流在播放" in second and "手动处理" in second, second[:200])
 dm = DM_MSGS[0] if DM_MSGS else ""
-check("私信不谎称已终止", "所有播放流已被强制终止" not in dm)
-check(f"私信说明账号被临时禁用、{HOLD} 秒后自动解封（诚实告知代价与恢复）",
-      "临时禁用" in dm and str(HOLD) in dm and "自动解封" in dm, dm[:400])
+check("第 3 次私信使用与封禁状态一致的文案",
+      "已达 3 次上限，账号已被封禁" in dm and "超过 3 次将自动封禁" not in dm, dm[:400])
 
-# 场景二：复验时确实都断了
+# 场景二：第一档之后的第二次违规仍只私聊，即使复验也不向群发送
+Row.concurrent_warn_count = 1
 async def main2():
+    global DISABLED_STATE
+    DISABLED_STATE = False
+    cpm.emby.is_user_disabled = _false
     GROUP_MSGS.clear(); DM_MSGS.clear(); SESSIONS_QUEUE.clear()
     SESSIONS_QUEUE.append(Res(True, [sess("s1"), sess("s2")]))
     SESSIONS_QUEUE.append(Res(True, []))     # 复验时已全部断开
     await cpm.check_concurrent_play_limit()
     await asyncio.sleep(0.2)
 asyncio.run(main2())
-check("复验确实 0 个流 → 文案『当前没有任何播放流』且『未重连』",
-      len(GROUP_MSGS) == 2 and "当前没有任何播放流" in GROUP_MSGS[1]
-      and "未重连" in GROUP_MSGS[1] and "原有 2 个已断开" in GROUP_MSGS[1],
-      GROUP_MSGS[1][:160] if len(GROUP_MSGS) > 1 else "无第二条")
+check("第 2 次私聊累计次数为 2/3", len(DM_MSGS) == 1
+      and "警告次数: **2** / **3**" in DM_MSGS[0], str(DM_MSGS))
+check("第 2 次复验结果仍不发群", GROUP_MSGS == [], str(GROUP_MSGS))
 
-# 场景三：GET 失败 → 不谎报
+# 场景三：第三次 GET 失败 → 不谎报，且群内复验继续发送
+Row.concurrent_warn_count = 2
 async def main3():
+    global DISABLED_STATE
+    DISABLED_STATE = False
     GROUP_MSGS.clear(); SESSIONS_QUEUE.clear()
     SESSIONS_QUEUE.append(Res(True, [sess("s1"), sess("s2")]))
     SESSIONS_QUEUE.append(Res(False, error="HTTP 503"))
     await cpm.check_concurrent_play_limit()
     await asyncio.sleep(0.2)
 asyncio.run(main3())
-check("复验取不到 → 『未能确认』，不说已停止",
+check("第 3 次复验取不到 → 群内报『未能确认』",
       len(GROUP_MSGS) == 2 and "未能确认" in GROUP_MSGS[1],
       GROUP_MSGS[1][:120] if len(GROUP_MSGS) > 1 else "无第二条")
 
@@ -423,6 +416,8 @@ check("复验取不到 → 『未能确认』，不说已停止",
 # 恰好把"踢流没成功、用户又连回来了"这个真实失败掩盖掉。
 # 按 UserId 判定的实现必须报「仍有 1 个流在播放（很可能重连）」。
 async def main4():
+    global DISABLED_STATE
+    DISABLED_STATE = False
     GROUP_MSGS.clear(); DM_MSGS.clear(); SESSIONS_QUEUE.clear()
     SESSIONS_QUEUE.append(Res(True, [sess("s1"), sess("s2")]))   # 检测：2 个流
     SESSIONS_QUEUE.append(Res(True, [sess("s9", "重连的剧")]))    # 复验：旧 id 没了，新 id 在播
@@ -436,8 +431,8 @@ for m in GROUP_MSGS[1:]:
 second = GROUP_MSGS[1] if len(GROUP_MSGS) > 1 else ""
 check("【假证据回归】旧 id 消失但有新 id 在播 → 必须报『仍有 1 个流在播放』",
       "仍有 1 个流在播放" in second, second[:200])
-check("【假证据回归】必须指出很可能重连、要求手动处理",
-      "重连" in second and "手动处理" in second, second[:200])
+check("【假证据回归】指出流仍在播放并要求手动处理",
+      "仍有 1 个流在播放" in second and "手动处理" in second, second[:200])
 check("【假证据回归】绝不得报『没有任何播放流』/『已确认全部断开』/『未重连』",
       not any(w in second for w in ("没有任何播放流", "已确认全部断开", "未重连")), second[:200])
 
@@ -459,6 +454,9 @@ async def main5():
 
 async def _true():
     return True
+
+async def _false():
+    return False
 
 run(main5())
 check("5a 踢流被拒（用户已被禁用）→ 走回退路径调度复验", len(VERIFY_SCHED) == 1,

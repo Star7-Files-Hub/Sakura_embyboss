@@ -155,7 +155,7 @@ def make_ns(db, on_terminate=None, threshold=3, limit=2):
 
     calls = {"terminate": 0, "ban": [], "announce": [], "warn": [], "db_writes": [],
              "restore_sweep": [], "is_disabled": [], "set_disabled": [], "kick_worker": [],
-             "kick_verify": []}
+             "kick_verify": [], "stop_verify": []}
 
     async def terminate_all_user_sessions(emby_user_id, sessions, reason=""):
         calls["terminate"] += 1
@@ -187,14 +187,13 @@ def make_ns(db, on_terminate=None, threshold=3, limit=2):
 
     ns["send_group_announcement"] = send_group_announcement
 
-    ns["_schedule_stop_verify"] = lambda *a, **k: None
-    # 2026-10-06 二轮：kick 路径不再用「按旧 session id」的复验，改成
-    # `_schedule_kick_verify(emby_user_id, user_name, wait, stream_count)`
-    # （按 UserId 复查，因为解封后重连会生成新 session id）。
-    # 本套件只关心警告计数竞态，这里换成记录替身即可；复验的判定语义由
-    # tests/test_kick_verify_userid.py 与 tests/test_terminate_verify.py 覆盖。
-    def _schedule_kick_verify(emby_user_id, user_name, wait, stream_count):
-        calls["kick_verify"].append((emby_user_id, user_name, wait, stream_count))
+    ns["_schedule_stop_verify"] = lambda *a, **k: calls["stop_verify"].append(dict(k))
+    # 本套件只关心计数和通知阶梯；记录复验群消息是否也遵循同一次违规的通知档位。
+    def _schedule_kick_verify(emby_user_id, user_name, wait, stream_count,
+                              announce_group=True):
+        calls["kick_verify"].append(
+            (emby_user_id, user_name, wait, stream_count, announce_group)
+        )
 
     ns["_schedule_kick_verify"] = _schedule_kick_verify
     ns["_now_str"] = lambda: "2026-10-04 22:00:00"
@@ -343,6 +342,28 @@ def fresh_db(warns):
                     concurrent_warn_count=warns)}
 
 
+print("════════ 阶梯通知渲染：第 1、2 次仅私聊，第 3 次起群+私聊 ════════")
+for previous, expected_count, expect_group in ((0, 1, False), (1, 2, False), (2, 3, True)):
+    db_step, calls_step, _ = run_case(None, fresh_db(previous))
+    dm_text = calls_step["warn"][0][1] if calls_step["warn"] else ""
+    group_text = calls_step["announce"][0] if calls_step["announce"] else ""
+    print(f"\n--- 第 {expected_count} 次：私聊 ---\n{dm_text}")
+    print(f"--- 第 {expected_count} 次：群聊 ---\n{group_text or '[不发送]'}")
+    check(f"第 {expected_count} 次计数持久化正确", db_step[TG].concurrent_warn_count == expected_count)
+    check(f"第 {expected_count} 次私聊包含累计次数", f"警告次数: **{expected_count}**" in dm_text)
+    check(f"第 {expected_count} 次群通知档位正确", bool(group_text) == expect_group)
+    if expect_group:
+        check("第 3 次群消息仍 @ 触发者并包含累计次数",
+              "tg://user?id=8638572039" in group_text
+              and "累计警告: **3**" in group_text)
+    if expected_count < 3:
+        check(f"第 {expected_count} 次复验通知跟随档位",
+              calls_step["kick_verify"][0][4] is expect_group)
+    else:
+        check("第 3 次封禁终态不调度临时踢流复验",
+              calls_step["kick_verify"] == [])
+
+
 print("════════ 1. 核心场景：I/O 期间管理员「🔄 重置警告」→ 重置不得被抹掉 ════════")
 # 任务读到 5，进入秒级 I/O；期间管理员重置为 0；任务回来必须写 1（本次新违规），
 # 而不是把重置抹掉写成 6。
@@ -360,16 +381,8 @@ check("管理员的重置没有被静默抹掉（最终值 = 重置后的 0 + �
       db[TG].concurrent_warn_count == 1, f"实际 {db[TG].concurrent_warn_count}")
 check("重置后未达阈值，不得误封用户", calls["ban"] == [], str(calls["ban"]))
 check("确实执行了终止流", calls["terminate"] == 1, str(calls["terminate"]))
-check("仍然发出了群通报", len(calls["announce"]) == 1, str(calls["announce"]))
-
-msg = calls["announce"][0] if calls["announce"] else ""
-print(f"  通报里的「累计警告」行: "
-      f"{[l for l in msg.splitlines() if '累计警告' in l]}")
-check("通报里的累计警告数字与数据库一致（都是 1）",
-      "累计警告: **1**" in msg, msg[:400])
-check("通报里不再出现两个互相矛盾的警告次数（修复前会是 6 与 1 并存）",
-      "**6**" not in msg, msg[:400])
-check("通报里没有残留占位符", "\x00" not in msg, repr(msg[:200]))
+check("第 1 次违规不发群通报（只私聊）", calls["announce"] == [], str(calls["announce"]))
+check("第 1 次违规仍私聊用户", len(calls["warn"]) == 1, str(calls["warn"]))
 # 未达阈值时，新的停流路径（临时封禁踢流）必须真的被执行到 —— 否则本套件只是
 # "碰巧没崩"，并没有覆盖真实路径；同时证明重置在这次 kick 落库之后依然是 1。
 check("未达阈值 → 真的走了临时封禁踢流（kick_until 已落库 + 已写 IsDisabled=True）",
@@ -406,8 +419,8 @@ db = fresh_db(0)
 db, calls, logs = run_case(None, db)
 check("无干扰时 0 → 1", db[TG].concurrent_warn_count == 1, str(db[TG].concurrent_warn_count))
 check("1 < 阈值 3 → 不封禁", calls["ban"] == [], str(calls["ban"]))
-check("文案提示还需再犯 2 次", "再犯 **2** 次" in (calls["announce"][0] if calls["announce"] else ""),
-      (calls["announce"][0] if calls["announce"] else "")[:400])
+check("第 1 次仍只发私聊、不发群", calls["announce"] == [] and len(calls["warn"]) == 1,
+      f"群={calls['announce']} 私聊={calls['warn']}")
 
 db = fresh_db(2)
 db, calls, logs = run_case(None, db)

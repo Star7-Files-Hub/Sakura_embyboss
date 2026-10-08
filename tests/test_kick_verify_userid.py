@@ -415,8 +415,8 @@ async def _case_schedule():
     seen = []
     gate = asyncio.Event()
 
-    async def _pending(emby_user_id, user_name, wait, stream_count):
-        seen.append((emby_user_id, user_name, wait, stream_count))
+    async def _pending(emby_user_id, user_name, wait, stream_count, announce_group=True):
+        seen.append((emby_user_id, user_name, wait, stream_count, announce_group))
         await gate.wait()
 
     orig = cpm._verify_kick_followup
@@ -438,7 +438,7 @@ async def _case_schedule():
 seen, is_task, held, released = run(_case_schedule())
 check("6a 返回一个 asyncio.Task", is_task)
 check("6b 参数原样透传（emby_user_id / user_name / wait / stream_count）",
-      seen == [(UID, "toe", 60, 3)], str(seen))
+      seen == [(UID, "toe", 60, 3, True)], str(seen))
 check("6c 任务未完成时被 _VERIFY_TASKS 持有强引用（否则可能被 GC 掉，复验就没了）", held)
 check("6d 任务完成后从 _VERIFY_TASKS 释放（不泄漏）", released)
 
