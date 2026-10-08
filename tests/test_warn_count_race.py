@@ -245,7 +245,9 @@ def make_ns(db, on_terminate=None, threshold=3, limit=2):
             calls["is_disabled"].append(emby_id)
             return False          # 用户本来是启用的 → 允许临时封禁
 
-        async def set_user_disabled(self, emby_id, disabled):
+        async def set_user_disabled(self, emby_id, disabled, before_write=None):
+            if before_write is not None and not await before_write():
+                return False
             calls["set_disabled"].append((emby_id, disabled))
             return True
 
@@ -287,6 +289,11 @@ def referenced_globals(src):
                 bound.add((alias.asname or alias.name).split(".")[0])
         elif isinstance(node, (ast.Global, ast.Nonlocal)):
             bound.update(node.names)
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            # 嵌套 def/class 的名字在 AST 里是**字符串属性**，不是 Name(Store) 节点。
+            # 不补进来的话，被测函数内部定义的闭包（例如 kick_user_streams 里的
+            # _persist_kick_marker）会被误判成"引用了不存在的全局替身"。
+            bound.add(node.name)
         elif isinstance(node, ast.Lambda):
             bound.update(a.arg for a in node.args.args)
     used = {n.id for n in ast.walk(tree)

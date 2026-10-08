@@ -180,6 +180,32 @@ def sql_get_emby(tg):
             return None
 
 
+def sql_get_emby_checked(tg):
+    """
+    与 `sql_get_emby` 相同，但**区分「查不到」与「查失败」**。
+
+    :return: (row, ok)
+        ok=True  → row 是查询结果（可能为 None，表示**确实不存在**这一行）
+        ok=False → 查询过程抛异常，row 无意义
+
+    为什么必须有这个区分：`sql_get_emby` 在异常时也返回 `None`，而 `_restore_kick`
+    的「接管护栏」把 `row is None` 解释成「这个禁用状态已被别人接管，不需要还原」。
+    于是**一次瞬时的数据库读失败**会被当成「已被接管」→ 直接返回成功 → 用户没被解封、
+    `restore_pending_kicks` 却报 `restored=1`、main.py 还打印
+    「启动自恢复：已还原 N 个遗留的临时封禁」，**群里一条告警都没有**。
+    这是实测复现过的假成功路径。
+    """
+    with Session() as session:
+        try:
+            emby = session.query(Emby).filter(
+                or_(Emby.tg == tg, Emby.name == tg, Emby.embyid == tg)
+            ).first()
+            return emby, True
+        except Exception as e:
+            LOGGER.error(f"查询emby记录失败（调用方须按读失败处理，不可当成行不存在） tg={tg}: {e}")
+            return None, False
+
+
 # def sql_get_emby_by_embyid(embyid):
 #     """
 #     Retrieve an Emby object from the database based on the provided Emby ID.

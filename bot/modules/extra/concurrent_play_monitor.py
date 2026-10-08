@@ -28,7 +28,7 @@ from bot.func_helper.emby import emby
 from bot.func_helper import emby as emby_mod
 from bot.func_helper.msg_utils import sendMessage, escape_markdown
 from bot.func_helper.utils import judge_admins
-from bot.sql_helper.sql_emby import sql_get_emby, sql_update_emby, Emby
+from bot.sql_helper.sql_emby import sql_get_emby, sql_get_emby_checked, sql_update_emby, Emby
 
 # 会话列表端点必须带 ActiveWithinSeconds。
 #
@@ -514,13 +514,31 @@ async def kick_user_streams(emby_user_id: str, tg_id: int = None,
     # 反过来的话，「禁用成功、落库失败」就永久锁死了用户；而现在这种顺序下，
     # 最坏情况只是留下一条 kick_until 却从没禁用过 —— 还原任务把 IsDisabled
     # 写成 False 是无副作用的空操作。
-    if not sql_update_emby(Emby.tg == tg_id, kick_until=until):
-        LOGGER.error(f"写入 kick_until 失败，拒绝临时禁用（避免永久锁死）: tg={tg_id}")
-        return {"disabled": False, "hold_seconds": hold_seconds, "until": None,
-                "error": "persist_failed"}
+    #
+    # 【落库必须与禁用同处一把锁内】这两步若不在同一临界区，会出现实测复现过的交错：
+    #   A 落库 kick_until → （等锁）→ B 持锁写 IsDisabled=false 并清掉 kick_until →
+    #   A 拿到锁写 IsDisabled=true
+    # 终态是「IsDisabled=true + kick_until=NULL」：`_restore_kick` 的接管护栏判为
+    # "已被别人接管"直接返回成功、`sql_get_pending_kicks()` 也查不到（它只查
+    # kick_until IS NOT NULL）→ **用户被永久锁死，而且群里零告警、零自动恢复途径**。
+    # 所以落库交给 `set_user_disabled` 的 `before_write` 回调，在锁内、POST 之前执行。
+    persist_failed = False
 
-    disabled = await emby.set_user_disabled(emby_user_id, True)
+    async def _persist_kick_marker() -> bool:
+        nonlocal persist_failed
+        ok = sql_update_emby(Emby.tg == tg_id, kick_until=until)
+        persist_failed = not ok
+        return ok
+
+    disabled = await emby.set_user_disabled(
+        emby_user_id, True, before_write=_persist_kick_marker
+    )
     if not disabled:
+        if persist_failed:
+            # 落库就失败了，且锁内回调让策略**一次都没写** —— 这正是我们要的
+            LOGGER.error(f"写入 kick_until 失败，拒绝临时禁用（避免永久锁死）: tg={tg_id}")
+            return {"disabled": False, "hold_seconds": hold_seconds, "until": None,
+                    "error": "persist_failed"}
         # 禁用没成功，清掉待还原标记，免得后台任务去做无意义的"还原"
         sql_update_emby(Emby.tg == tg_id, kick_until=None)
         LOGGER.error(f"临时禁用失败: emby_id={emby_user_id}, tg={tg_id}")
@@ -560,7 +578,19 @@ async def _restore_kick(emby_user_id: str, tg_id: int, source: str) -> bool:
     # （ban_user 会清标记），或已经还原过一次。此时若还去写 IsDisabled=False，
     # 就会把**真正的封禁**悄悄解开，管理员会看到"刚封的人自己解封了"。
     if tg_id is not None:
-        row = sql_get_emby(tg=tg_id)
+        row, read_ok = sql_get_emby_checked(tg=tg_id)
+        if not read_ok:
+            # 【读失败 ≠ 已被接管】`sql_get_emby` 在**异常时也返回 None**，而上面的
+            # 护栏把 row is None 解释成"这个禁用状态已被接管"→ 直接返回成功。于是一次
+            # 瞬时的数据库读失败会变成：用户没被解封、`restore_pending_kicks` 却报
+            # `restored=1`、main.py 还打印「启动自恢复：已还原 N 个遗留的临时封禁」，
+            # 而**群里一条告警都没有**（实测复现过这条假成功路径）。
+            # 所以读失败必须走失败分支：返回 False → 保留 kick_until → 周期巡检与启动
+            # 自恢复继续重试，同时按失败路径把问题喊到群里（有节流）。
+            LOGGER.error(
+                f"无法读取 kick_until（数据库读失败），本轮既不还原也不宣告成功: tg={tg_id}"
+            )
+            return False
         if row is None or getattr(row, "kick_until", None) is None:
             LOGGER.info(f"kick_until 已清空，跳过还原（禁用状态已被接管）: tg={tg_id}")
             return True

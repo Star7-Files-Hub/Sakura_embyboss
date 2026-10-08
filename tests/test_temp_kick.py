@@ -123,6 +123,11 @@ def referenced_globals(src):
                 bound.add((alias.asname or alias.name).split(".")[0])
         elif isinstance(node, (ast.Global, ast.Nonlocal)):
             bound.update(node.names)
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            # 嵌套 def/class 的名字在 AST 里是**字符串属性**，不是 Name(Store) 节点。
+            # 不补进来的话，被测函数内部定义的闭包（例如 kick_user_streams 里的
+            # _persist_kick_marker）会被误判成"引用了不存在的全局替身"。
+            bound.add(node.name)
         elif isinstance(node, ast.Lambda):
             bound.update(a.arg for a in node.args.args)
     used = {n.id for n in ast.walk(tree)
@@ -232,7 +237,20 @@ def make_env(*, is_disabled=False, persist_ok=True, disable_ok=True,
     ev["rows"] = rows
 
     def sql_get_emby(tg=None, **kw):
+        # 真实 `sql_get_emby` 在**查询抛异常时也返回 None**（sql_emby.py 的
+        # `except → return None`）。桩必须照这个行为来，否则「读失败被当成行不存在」
+        # 这条 P2 回归根本不可能被测出来 —— 变异时会看到桩照样返回那一行，
+        # 于是错的东西反而"通过"。
+        if ev.get("db_read_raises"):
+            return None
         return rows.get(tg)
+
+    # 真实 `_restore_kick` 用的是三态版本（区分「查不到」与「查失败」），
+    # 默认按"读成功"返回，好让既有场景语义不变。
+    def sql_get_emby_checked(tg=None, **kw):
+        if ev.get("db_read_raises"):
+            return None, False
+        return rows.get(tg), True
 
     def sql_get_by_embyid(embyid):
         for r in rows.values():
@@ -253,6 +271,7 @@ def make_env(*, is_disabled=False, persist_ok=True, disable_ok=True,
         return persist_ok
 
     ns["sql_get_emby"] = sql_get_emby
+    ns["sql_get_emby_checked"] = sql_get_emby_checked
     ns["sql_get_by_embyid"] = sql_get_by_embyid
     ns["sql_update_emby"] = sql_update_emby
 
@@ -269,8 +288,16 @@ def make_env(*, is_disabled=False, persist_ok=True, disable_ok=True,
             ev["is_disabled"].append(emby_id)
             return self.state["is_disabled"]
 
-        async def set_user_disabled(self, emby_id, disabled):
+        async def set_user_disabled(self, emby_id, disabled, before_write=None):
             ev["set_disabled"].append((emby_id, disabled))
+            # 真实实现把「落库」放在**锁内、POST 之前**（`before_write` 回调），
+            # 所以调用顺序必须是 persist → disable。替身也照这个顺序记录，
+            # 否则「顺序不可颠倒」那条断言会测到一个假的顺序。
+            if before_write is not None:
+                if not await before_write():
+                    # 落库失败 → 真实实现直接放弃这次写入，一次 POST 都不发
+                    ev["events"].append(("before_write_failed", disabled))
+                    return False
             ev["events"].append(("disable", disabled))
             return self.state["disable_ok"] if disabled else self.state["restore_write_ok"]
 
@@ -437,7 +464,15 @@ ns, ev = make_env(persist_ok=False)
 res = kick(ns)
 check("3a error = persist_failed", res["error"] == "persist_failed", str(res))
 check("3b disabled=False", res["disabled"] is False, str(res))
-check("3c set_user_disabled 一次都没有被调用", ev["set_disabled"] == [], str(ev["set_disabled"]))
+# 【断言口径在 P1 修复后更新过】落库现在发生在 `set_user_disabled` **锁内**的
+# `before_write` 回调里（这样「落库 + 写策略」才是一个原子临界区，见 kick_user_streams
+# 的注释）。所以 `set_user_disabled` 现在**会被调用**——真正必须钉死的不变量是
+# 「**一次策略写入都没发生**」，那才是"绝不禁用"的可观测含义。
+check("3c 落库失败时一次策略写入都没发生（没有 disable 事件）",
+      not [e for e in ev["events"] if e[0] == "disable"],
+      str(ev["events"]))
+check("3c2 set_user_disabled 虽然被调用，但回调失败后直接放弃（标记为 before_write_failed）",
+      ("before_write_failed", True) in ev["events"], str(ev["events"]))
 check("3d 没有创建还原任务（不会留下无主任务）", len(ns["_KICK_TASKS"]) == 0,
       str(ns["_KICK_TASKS"]))
 check("3e 记录了 error 日志（便于运维发现落库故障）",
@@ -562,6 +597,26 @@ ok = restore(ns, source="启动自恢复")
 check("10e 记录不存在时同样不动手（返回 True 且不写 IsDisabled）",
       ok is True and ev["set_disabled"] == [] and ev["db"] == [],
       f"ok={ok} set={ev['set_disabled']} db={ev['db']}")
+
+print()
+print("=" * 78)
+print("10.5 【P2 回归】数据库**读失败** ≠ 已被接管")
+print("=" * 78)
+print("   `sql_get_emby` 在异常时也返回 None，而接管护栏把 None 解释成")
+print("   「这个禁用已被别人接管」→ 直接返回成功。于是一次瞬时读失败会变成：")
+print("   用户没被解封、restore_pending_kicks 却报 restored=1、main.py 还打印")
+print("   「启动自恢复：已还原 N 个遗留的临时封禁」，而群里一条告警都没有。")
+ns, ev = make_env(kick_until_set=True)       # 标记在、本该被还原
+ev["db_read_raises"] = True                  # 但数据库这次读失败
+ok = restore(ns, source="启动自恢复")
+check("10f 读失败 → 返回 False（返回 True 就是「已还原」的假成功）", ok is False, str(ok))
+check("10g 读失败 → 一次都没动 IsDisabled（用户可能还锁着，不能假装处理过）",
+      ev["set_disabled"] == [], str(ev["set_disabled"]))
+check("10h 读失败 → 没有清 kick_until（否则巡检再也找不到这条待还原记录）",
+      not [d for d in ev["db"] if d.get("kick_until", "x") is None], str(ev["db"]))
+check("10i 读失败 → 记 error 日志且口径点明是「读失败」",
+      any(l == "error" and "读失败" in m for l, m in ev["logs"]),
+      str(ev["logs"][-3:]))
 
 print()
 print("=" * 78)

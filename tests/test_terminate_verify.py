@@ -63,7 +63,13 @@ def make_emby():
         async def is_user_disabled(self, emby_id):
             # 用户本来是启用的 → 允许走新的「临时封禁踢流」路径
             return False
-        async def set_user_disabled(self, emby_id, disabled):
+        async def set_user_disabled(self, emby_id, disabled, before_write=None):
+            # 真实实现把「落库」放在**锁内、POST 之前**（before_write 回调），
+            # 顺序必须是 persist → disable，替身也照这个顺序记。
+            if before_write is not None:
+                if not await before_write():
+                    EVENTS.append(("before_write_failed", disabled))
+                    return False
             EVENTS.append(("disable", disabled))
             return True
     return E()
@@ -117,6 +123,8 @@ class EmbyRow:
     tg = EmbyCol()
 sql_emby.Emby = EmbyRow
 sql_emby.sql_get_emby = lambda **k: None
+# 真实 `_restore_kick` 用三态版本（区分「查不到」与「查失败」）；这里按"读成功"给。
+sql_emby.sql_get_emby_checked = lambda **k: (None, True)
 sql_emby.sql_update_emby = lambda *a, **k: None
 # check_concurrent_play_limit 现在每轮先做一次「到期未还原的临时封禁」巡检，
 # 它内部 `from bot.sql_helper.sql_emby import sql_get_pending_kicks`。补上这个

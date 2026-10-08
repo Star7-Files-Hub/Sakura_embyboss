@@ -1046,7 +1046,8 @@ class Embyservice(metaclass=Singleton):
         policy = user.get("Policy") or {}
         return bool(policy.get("IsDisabled", False))
 
-    async def set_user_disabled(self, emby_id: str, disabled: bool) -> bool:
+    async def set_user_disabled(self, emby_id: str, disabled: bool,
+                                before_write=None) -> bool:
         """
         **最小化**地翻转用户的 `IsDisabled`，其余策略字段原样保留。
 
@@ -1060,6 +1061,14 @@ class Embyservice(metaclass=Singleton):
 
         :param emby_id: Emby 用户ID
         :param disabled: 目标状态
+        :param before_write: **可选的 async 回调**，在锁内、`POST /Policy` **之前**
+            执行；返回假值时**放弃本次写入**并让本函数返回 False。
+            存在的唯一理由：调用方（`kick_user_streams`）必须把「落库 kick_until」
+            和「写 IsDisabled」做成**一个临界区**。若落库在锁外做，就会出现
+            实测复现过的交错：A 落库标记 → B 持锁写 false 并清掉标记 → A 拿到锁
+            写 true → 终态「`IsDisabled=true` + `kick_until=NULL`」，
+            `_restore_kick` 判为"已被接管"直接返回成功 → **永久锁死且零告警**。
+            把落库塞进锁内之后，这个交错在构造上不可能发生。
         :return: 是否写入成功（读不到原策略时**拒绝写入**，避免用不完整策略覆盖）
         """
         try:
@@ -1079,6 +1088,17 @@ class Embyservice(metaclass=Singleton):
                 if bool(policy.get("IsDisabled", False)) == bool(disabled):
                     LOGGER.info(f"用户 IsDisabled 已是 {disabled}，无需写入: {emby_id}")
                     return True
+
+                # 注意位置：**在"已经是目标状态"的提前返回之后**。
+                # 若放在前面，一个"本来就被别人禁用"的用户会让我们落下一个
+                # kick_until，而这次的 IsDisabled 根本没被我们改过 —— 之后还原任务
+                # 就会把**别人的封禁**解开。所以只有确定要写，才允许落标记。
+                if before_write is not None:
+                    if not await before_write():
+                        LOGGER.error(
+                            f"before_write 回调失败，放弃写入 IsDisabled={disabled}: {emby_id}"
+                        )
+                        return False
 
                 policy["IsDisabled"] = bool(disabled)
                 result = await self._request('POST', f'/emby/Users/{emby_id}/Policy', json=policy)

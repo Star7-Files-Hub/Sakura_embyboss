@@ -161,6 +161,7 @@ def _install_stub_modules():
 
     sql_emby.Emby = EmbyRow
     sql_emby.sql_get_emby = lambda **k: None
+    sql_emby.sql_get_emby_checked = lambda **k: (None, True)
     sql_emby.sql_update_emby = lambda *a, **k: True
     sql_emby.sql_get_pending_kicks = lambda: []
     mods = [("bot", bot_mod), ("bot.func_helper", types.ModuleType("bot.func_helper")),

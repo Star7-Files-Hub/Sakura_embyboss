@@ -182,6 +182,11 @@ def make_store():
     }
 
 
+async def _false():
+    """`before_write` 回调的失败形态（落库失败）。"""
+    return False
+
+
 class World:
     """
     一个可控的策略存储 + `_request` 替身。
@@ -348,6 +353,139 @@ async def main():
     check("5.3 收到 current_policy 会记一条 warning",
           any(l == "warning" and "current_policy" in m for (l, m) in LOGS),
           f"日志={LOGS}")
+
+    print()
+    print("=" * 78)
+    print("6. P1 回归：落库（before_write）必须与写策略同处一把锁内")
+    print("=" * 78)
+    print("   场景：A 走「临时封禁踢流」的落库+禁用；B 同时是别的策略写入者。")
+    print("   若落库在锁外做，B 能插进 A 的落库与写策略之间 —— 终态会是")
+    print("   「IsDisabled=true + kick_until=NULL」，即零告警的永久锁死。")
+
+    async def scenario_p1(use_real_lock):
+        store = make_store()
+        order = []
+        first_get = {"done": False}
+
+        async def handler(method, endpoint, kw):
+            if method == "GET":
+                snap = copy.deepcopy(store)
+                if not first_get["done"]:
+                    first_get["done"] = True
+                    for _ in range(20):
+                        await asyncio.sleep(0)
+                return Res(True, {"Id": "u1", "Policy": snap})
+            body = copy.deepcopy(kw.get("json") or {})
+            store.clear()
+            store.update(body)
+            return Res(True, {})
+
+        svc = FakeEmby(handler)
+        holder = {}
+
+        async def persist_marker():
+            """
+            等价于 kick_user_streams 里写 kick_until 的那个回调。
+
+            关键：**在这个回调内部**启动 B。这样 B 必然是在 A 的临界区正中间发起的，
+            于是「B 能不能插进 A 的落库与写策略之间」就被精确测出来 —— 而不是靠
+            两个任务的启动时序碰运气。
+            """
+            order.append("persist")
+            holder["b"] = asyncio.create_task(writer_b())
+            for _ in range(10):
+                await asyncio.sleep(0)
+            return True
+
+        async def writer_a():
+            ok = await svc.set_user_disabled("u1", True, before_write=persist_marker)
+            order.append("A_POST done")
+            return ok
+
+        async def writer_b():
+            order.append("B_enter")
+            r = await svc.emby_change_policy("u1", admin=False, disable=False)
+            order.append("B_POST done")
+            return r
+
+        old = ns["_POLICY_WRITE_LOCK"]
+        ns["_POLICY_WRITE_LOCK"] = old if use_real_lock else _NullLock()
+        try:
+            ta = asyncio.create_task(writer_a())
+            await asyncio.sleep(0)
+            await asyncio.sleep(0)
+            # B 由 persist_marker 内部创建；这里等 A 先跑到落库
+            for _ in range(50):
+                if "persist" in order:
+                    break
+                await asyncio.sleep(0)
+            if holder.get("b"):
+                await asyncio.gather(ta, holder["b"], return_exceptions=True)
+            else:
+                await ta
+        finally:
+            ns["_POLICY_WRITE_LOCK"] = old
+        return {"order": order, "seq": [(m, e.rsplit("/", 1)[-1]) for (m, e, _b) in svc.calls]}
+
+    p1 = await scenario_p1(use_real_lock=True)
+    print(f"  修复后顺序：{p1['order']}")
+    print(f"  调用序列： {p1['seq']}")
+    a_idx = p1["order"].index("A_POST done")
+    b_idx = p1["order"].index("B_POST done")
+    check("6.1 B 的写入排在 A 的写入之后（B 插不进 A 的「落库 → 写策略」）",
+          b_idx > a_idx,
+          f"顺序={p1['order']} —— B 在 A 写策略之前就完成了，说明落库没和写策略原子")
+
+    p1m = await scenario_p1(use_real_lock=False)
+    print(f"  空锁顺序：  {p1m['order']}")
+    print(f"  空锁序列：  {p1m['seq']}")
+    a_idx_m = p1m["order"].index("A_POST done")
+    b_idx_m = p1m["order"].index("B_POST done")
+    check("6.2 空锁时 B 确实插进了 A 的临界区（证明 6.1 有判别力）",
+          b_idx_m < a_idx_m,
+          f"顺序={p1m['order']} —— 变异没复现，6.1 测不出东西")
+
+    print()
+    print("=" * 78)
+    print("7. P1 回归：before_write 失败时一次策略写入都不能发生")
+    print("=" * 78)
+    w4 = World(yield_times=0)
+    ok4 = await w4.svc.set_user_disabled("u1", True, before_write=lambda: _false())
+    check("7.1 回调返回 False → 本函数返回 False", ok4 is False, f"实际={ok4!r}")
+    check("7.2 回调返回 False → 零 POST（不能在没落库的情况下把人禁掉）",
+          not [c for c in w4.svc.calls if c[0] == "POST"], f"调用={w4.svc.calls}")
+
+    w5 = World(yield_times=0)
+    seen = []
+
+    async def cb_ok():
+        seen.append("cb")
+        return True
+
+    ok5 = await w5.svc.set_user_disabled("u1", True, before_write=cb_ok)
+    posts = [c for c in w5.svc.calls if c[0] == "POST"]
+    check("7.3 回调成功 → 写入成功", ok5 is True, f"实际={ok5!r}")
+    check("7.4 回调确实被调用了，且写入发生了", seen == ["cb"] and len(posts) == 1,
+          f"seen={seen} posts={len(posts)}")
+
+    w6 = World(yield_times=0)
+    ok6 = await w6.svc.set_user_disabled("u2", True, before_write=None)
+    check("7.5 不传回调时行为不变（仍然正常写入）",
+          ok6 is True and len([c for c in w6.svc.calls if c[0] == "POST"]) == 1,
+          f"ok={ok6!r} calls={w6.svc.calls}")
+
+    w7 = World(yield_times=0)
+    w7.store["IsDisabled"] = True          # 已经是目标状态
+    ran = []
+
+    async def cb_never():
+        ran.append("should-not-run")
+        return True
+
+    ok7 = await w7.svc.set_user_disabled("u1", True, before_write=cb_never)
+    check("7.6 已经是目标状态时提前返回，**不得**执行落库回调",
+          ok7 is True and ran == [],
+          f"ok={ok7!r} ran={ran} —— 落标记却没有改 IsDisabled 会让还原任务解开别人的封禁")
 
     print()
     print("=" * 78)
