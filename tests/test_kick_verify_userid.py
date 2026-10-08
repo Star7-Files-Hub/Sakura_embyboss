@@ -137,6 +137,16 @@ def _install_stub_modules():
         pass
 
     msg_utils.sendMessage = _sendMessage
+    # 真实 escape_markdown（_mention 依赖）。**不能**用 lambda 假替身：
+    # 转义字符集是本套件要断言的行为之一。
+    import html as _html, re as _re
+    _mut_src = (REPO / "bot/func_helper/msg_utils.py").read_text(encoding="utf-8")
+    _h = [n for n in ast.walk(ast.parse(_mut_src))
+          if isinstance(n, ast.FunctionDef) and n.name == "escape_markdown"]
+    assert len(_h) == 1, f"escape_markdown 命中 {len(_h)} 次"
+    exec(compile(textwrap.dedent(ast.get_source_segment(_mut_src, _h[0])),
+                 str(REPO / "bot/func_helper/msg_utils.py"), "exec"),
+         {"re": _re, "html": _html, "escape_markdown": None}, msg_utils.__dict__)
     utils = types.ModuleType("bot.func_helper.utils")
     utils.judge_admins = lambda uid: False
     sql_emby = types.ModuleType("bot.sql_helper.sql_emby")

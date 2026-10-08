@@ -33,6 +33,8 @@ tests/test_temp_kick.py —— 「临时封禁踢流」行为级测试套件。
 import ast
 import asyncio
 import builtins
+import html
+import re
 import sys
 import textwrap
 import types
@@ -81,7 +83,23 @@ def module_const(name):
 EXTRACTED = ("_utcnow", "kick_user_streams", "_kick_restore_worker", "_restore_kick",
              "restore_pending_kicks", "ban_user", "check_concurrent_play_limit",
              "_schedule_kick_verify", "_should_alert_restore_failure",
-             "_restore_alert_key", "_clear_restore_alert")
+             "_restore_alert_key", "_clear_restore_alert", "_mention")
+
+# _mention 依赖真 `escape_markdown`。**不能**桩成 lambda s: s —— 那样"名字里的
+# Markdown 特殊字符被转义"这条断言就失去意义了。这里把 msg_utils.py 里的**真实**
+# 纯函数抽出来（只依赖 re / html）。
+MSG_SRC_TEXT = (REPO / "bot/func_helper/msg_utils.py").read_text(encoding="utf-8")
+
+
+def extract_from(src_text, name):
+    hits = [n for n in ast.walk(ast.parse(src_text))
+            if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name == name]
+    if len(hits) != 1:
+        raise AssertionError(f"{name} 命中 {len(hits)} 次（期望 1 次）")
+    return textwrap.dedent(ast.get_source_segment(src_text, hits[0]))
+
+
+ESCAPE_MD_SRC = extract_from(MSG_SRC_TEXT, "escape_markdown")
 FN_SRC = "\n\n\n".join(extract(n) for n in EXTRACTED)
 
 HOLD = module_const("_KICK_HOLD_SECONDS")
@@ -187,6 +205,10 @@ def make_env(*, is_disabled=False, persist_ok=True, disable_ok=True,
     ns["_RESTORE_ALERTS"] = {}      # 每个环境一份，避免用例之间互相节流
     ns["_STOP_VERIFY_FOLLOWUP"] = module_const("_STOP_VERIFY_FOLLOWUP")
     ns["_WARN_N_PLACEHOLDER"] = module_const("_WARN_N_PLACEHOLDER")
+    # 真实的 escape_markdown（只依赖 re / html）
+    ns["re"] = re
+    ns["html"] = html
+    exec(compile(ESCAPE_MD_SRC, "msg_utils.py", "exec"), ns)   # noqa: S102
 
     def _mk_logger(level):
         def _log(msg, *a, **k):
@@ -320,7 +342,7 @@ def make_env(*, is_disabled=False, persist_ok=True, disable_ok=True,
     # ── 装入真实函数（抽取自源码） ──
     exec(compile(FN_SRC, str(SRC), "exec"), ns)  # noqa: S102 - 被测代码就是本仓库源码
 
-    # 默认把「还原任务」换成替身：真实 worker 会 sleep hold_seconds(45s)，在
+    # 默认把「还原任务」换成替身：真实 worker 会 sleep hold_seconds(=HOLD)，在
     # asyncio.run 收尾时被取消 → 会顺带调用 _restore_kick → 污染 set_disabled/events
     # 记录，让"踢流本身"的断言变得不确定。第 14 条专门用真实 worker 验证取消语义。
     # 可伪造的时钟：节流测试要"推进 1800 秒"，不能真等。默认冻结在真实当前时刻，
@@ -437,7 +459,7 @@ check("4d 没有创建还原任务", len(ns["_KICK_TASKS"]) == 0, str(ns["_KICK_
 
 print()
 print("=" * 78)
-print("5. 【护栏】用户已被禁用 → 不得踢（否则会把管理员的封禁当成自己的、45 秒后解开）")
+print("5. 【护栏】用户已被禁用 → 不得踢（否则会把管理员的封禁当成自己的、HOLD 秒后解开）")
 print("=" * 78)
 ns, ev = make_env(is_disabled=True)
 res = kick(ns)
@@ -446,7 +468,7 @@ check("5b disabled=False", res["disabled"] is False, str(res))
 check("5c 一次都没有写库（不落 kick_until）", ev["db"] == [], str(ev["db"]))
 check("5d 一次都没有调 set_user_disabled（不会去动管理员的封禁）",
       ev["set_disabled"] == [], str(ev["set_disabled"]))
-check("5e 没有创建还原任务（否则 45 秒后会解开管理员的封禁）",
+check("5e 没有创建还原任务（否则 hold_seconds 后会解开管理员的封禁）",
       len(ns["_KICK_TASKS"]) == 0, str(ns["_KICK_TASKS"]))
 
 print()
@@ -895,6 +917,61 @@ check("19h ★【新事故】还原成功后、窗口内同原因再失败 → �
       f"r4={r4} announce={len(ev['announce'])}（1 条 = 新事故被压掉了）")
 check("19i 两条通报都是「还原失败」告警（不是别的消息凑数）",
       all("临时封禁还原失败" in a for a in ev["announce"]), str(ev["announce"])[:200])
+
+print()
+print("=" * 78)
+print("20. 群里 @ 触发者（_mention）+ 临时封禁时长（用户明确要求 3 分钟）")
+print("=" * 78)
+_mention = ns["_mention"]
+check("20a 有 tg_id → 文本提及 `[名字](tg://user?id=<id>)`（不依赖 username）",
+      _mention(TG, "toe") == f"[toe](tg://user?id={TG})", str(_mention(TG, "toe")))
+# 名字不转义的话，legacy Markdown 遇到 `_ * ` [ ]` 会让整条通报 400 发不出去
+_weird = "a_b*c`d[e]f"
+_m = _mention(TG, _weird)
+check("20b 名字里的 Markdown 特殊字符被**真实** escape_markdown 转义（用真函数，不是 lambda）",
+      _m == "[a\\_b\\*c\\`d\\[e\\]f](tg://user?id=%d)" % TG, repr(_m))
+check("20c 转义结果里不含未转义的裸下划线/星号（否则整条消息会 400）",
+      "\\_" in _m and "\\*" in _m and "\\[" in _m and "\\]" in _m and "\\`" in _m, repr(_m))
+check("20d tg_id 为 None → 空串（绝不产生 tg://user?id=None 死链）",
+      _mention(None, "toe") == "" and _mention(0, "toe") == "",
+      f"{_mention(None, 'toe')!r} {_mention(0, 'toe')!r}")
+check("20e 名字缺失时退回用 tg_id 当标签（不是 None 文本）",
+      _mention(TG, None) == f"[{TG}](tg://user?id={TG})", str(_mention(TG, None)))
+
+# 群通报必须真的带上 @（不是只在本函数里能生成）
+ns, ev = make_env(warn_count=0, threshold=3, streams=3, limit=2, is_disabled=False)
+asyncio.run(ns["check_concurrent_play_limit"]())
+_first = ev["announce"][0] if ev["announce"] else ""
+check("20f 群通报里含触发者的文本提及（@ 到本人）",
+      f"tg://user?id={TG}" in _first and "🔔 触发者" in _first, _first[:200] or "没有通报")
+check("20g 群通报里带上 TG 号（可人工核对是谁）",
+      f"（TG: `{TG}`）" in _first, _first[:200])
+
+# 没绑定 TG 的账号：@ 不了，必须**如实写明**，而不是静默留空
+_rows = {None: Row(tg=None, embyid=EMBY, name="toe", lv="b", concurrent_warn_count=0)}
+ns2, ev2 = make_env(warn_count=0, threshold=3, streams=3, limit=2, is_disabled=False,
+                    rows=_rows)
+asyncio.run(ns2["check_concurrent_play_limit"]())
+_first2 = ev2["announce"][0] if ev2["announce"] else ""
+check("20h 无 tg_id → 通报写明「该账号未绑定 TG，无法 @ 通知」",
+      "未绑定 TG" in _first2, _first2[:200] or "没有通报")
+check("20i 无 tg_id → 通报里绝不出现 tg://user?id= 死链",
+      "tg://user?id=" not in _first2, _first2[:200])
+
+# 时长：用户明确要求 3 分钟。这条**故意**硬编码 180 —— 它是需求本身，
+# 改需求时就必须显式改这里；其余地方一律从 _KICK_HOLD_SECONDS 推导。
+check("20j 临时封禁时长 = 180 秒（用户明确要求 3 分钟）", HOLD == 180, f"HOLD={HOLD}")
+ns3, ev3 = make_env(warn_count=0, threshold=3, streams=3, limit=2, is_disabled=False)
+asyncio.run(ns3["check_concurrent_play_limit"]())
+_waits3 = [w for (_u, _n, w, _c) in ev3["kick_sched"]]
+check("20k kick 路径的复验 wait 严格大于 hold_seconds（HOLD=%d 秒）" % HOLD,
+      bool(_waits3) and all(w is not None and w > HOLD for w in _waits3),
+      f"wait={_waits3} HOLD={HOLD}")
+check("20l 落库的 kick_until ≈ now + HOLD（不是旧的 45 秒）",
+      bool(ev3["db"]) and any(abs((v - ev3["clock"]["now"]).total_seconds() - HOLD) < 1
+                              for d in ev3["db"] for k, v in d.items()
+                              if k == "kick_until" and v is not None),
+      str([(k, v) for d in ev3["db"] for k, v in d.items()]))
 
 print()
 print("=" * 78)

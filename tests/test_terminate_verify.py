@@ -92,6 +92,20 @@ emby_pkg.is_emby_admin = _not_admin
 msg_utils = types.ModuleType("bot.func_helper.msg_utils")
 async def _sendMessage(*a, **k): pass
 msg_utils.sendMessage = _sendMessage
+# concurrent_play_monitor 现在 `from bot.func_helper.msg_utils import sendMessage,
+# escape_markdown`。**不能**桩成 lambda s: s —— 那会让"名字里的 Markdown 特殊
+# 字符被转义"失去意义。这里从真实源码抽出纯函数挂上去。
+import ast as _ast_early, html as _html_early, re as _re_early, textwrap as _tw_early
+_MSG_UTILS_SRC = (os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+                  + "/bot/func_helper/msg_utils.py")
+_MUT = open(_MSG_UTILS_SRC, encoding="utf-8").read()
+_hits = [n for n in _ast_early.walk(_ast_early.parse(_MUT))
+         if isinstance(n, _ast_early.FunctionDef) and n.name == "escape_markdown"]
+assert len(_hits) == 1, f"escape_markdown 命中 {len(_hits)} 次"
+exec(compile(_tw_early.dedent(_ast_early.get_source_segment(_MUT, _hits[0])),
+             _MSG_UTILS_SRC, "exec"),
+     {"re": _re_early, "html": _html_early, "escape_markdown": None},
+     msg_utils.__dict__)
 
 utils = types.ModuleType("bot.func_helper.utils")
 utils.judge_admins = lambda uid: False
@@ -333,7 +347,7 @@ first = GROUP_MSGS[0] if GROUP_MSGS else ""
 check("首报用『已下发停止指令』而非『已终止』", "已下发停止指令: 2 个流" in first)
 check("首报不再出现『已终止:』", "已终止:" not in first)
 # 旧断言断言的是被删掉的旧文案（「复验结果将在 30 秒后补发」）。新实现刻意**不再**
-# 承诺"30 秒后复验"：走临时封禁踢流时用户要到 hold_seconds(45s) 之后才解封，30 秒时
+# 承诺"30 秒后复验"：走临时封禁踢流时用户要到 hold_seconds 之后才解封，30 秒时
 # 他其实"还禁着"，那时看到的"已断开"证明不了解封后没重连。所以这里改断言**语义**：
 #   ① 说清实际做了什么（已下发指令 + 临时禁用踢流）；② 不谎称已终止/已断开；
 #   ③ 复验调度时间必须晚于解封时刻（这才是"复验有意义"的前提）。
@@ -343,11 +357,16 @@ check("首报说明实际动作是『临时禁用该账号』且到期自动解�
       "临时禁用" in first and "到期自动解封" in first, first[:400])
 check("首报不谎称流已被终止/已断开",
       not any(w in first for w in ("已终止", "已被强制终止", "已断开")), first[:400])
+check("首报 @ 到触发者本人（文本提及，不依赖 username）",
+      "tg://user?id=1156115326" in first and "🔔 触发者" in first, first[:240])
+check("首报带上 TG 号便于人工核对", "（TG: `1156115326`）" in first, first[:240])
 kick_sched = list(KICK_SCHED)
-check("复验按 UserId 调度（不是按旧 session id），且 wait 晚于解封时刻（> 45 秒）",
+# 时长从源码常量推导，不硬编码 45/180（下次调整需求时这里不该再红一片）
+HOLD = cpm._KICK_HOLD_SECONDS
+check(f"复验按 UserId 调度（不是按旧 session id），且 wait 晚于解封时刻（> {HOLD}s）",
       len(kick_sched) == 1
       and kick_sched[0][0] == "f58ac4d2b82341b492e7d5309a024b39"
-      and kick_sched[0][2] > 45 and kick_sched[0][3] == 2
+      and kick_sched[0][2] > HOLD and kick_sched[0][3] == 2
       and VERIFY_SCHED == [],
       f"kick_sched={kick_sched} 旧按id调度={VERIFY_SCHED}")
 kick_events = [e for e in EVENTS
@@ -361,8 +380,8 @@ check("复验指出很可能是解封后重连、要求手动处理",
       "重连" in second and "手动处理" in second, second[:160])
 dm = DM_MSGS[0] if DM_MSGS else ""
 check("私信不谎称已终止", "所有播放流已被强制终止" not in dm)
-check("私信说明账号被临时禁用、45 秒后自动解封（诚实告知代价与恢复）",
-      "临时禁用" in dm and "45" in dm and "自动解封" in dm, dm[:400])
+check(f"私信说明账号被临时禁用、{HOLD} 秒后自动解封（诚实告知代价与恢复）",
+      "临时禁用" in dm and str(HOLD) in dm and "自动解封" in dm, dm[:400])
 
 # 场景二：复验时确实都断了
 async def main2():

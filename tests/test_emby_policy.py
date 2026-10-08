@@ -22,7 +22,7 @@ import copy
 import sys
 import textwrap
 from pathlib import Path
-from typing import Optional
+from typing import Any, Dict, List, Optional
 
 PASS, FAIL = 0, 0
 REPO = Path(__file__).resolve().parent.parent
@@ -49,7 +49,8 @@ def extract(name):
     return textwrap.dedent(ast.get_source_segment(SRC_TEXT, hits[0]))
 
 
-METHODS = ("get_user", "is_user_disabled", "set_user_disabled", "emby_change_policy")
+METHODS = ("get_user", "is_user_disabled", "set_user_disabled", "emby_change_policy",
+           "update_user_enabled_folder")
 EXTRACTED = ("create_policy",) + METHODS
 FN_SRC = "\n\n\n".join(extract(n) for n in EXTRACTED)
 
@@ -78,9 +79,12 @@ class _Emby:
     embyid = _EmbyCol()
 
 
+DB_STATE = {"ok": True}      # 可翻转：模拟「匹配不到行 → sql_update_emby 返回 False」
+
+
 def _sql_update_emby(where, **kw):
     DB_WRITES.append((where, dict(kw)))
-    return True
+    return DB_STATE["ok"]
 
 
 class _Logger:
@@ -100,6 +104,15 @@ ns = {
     "extra_emby_libs": ["成人", "里番"],
     "Emby": _Emby,
     "sql_update_emby": _sql_update_emby,
+    # 类型注解（update_user_enabled_folder 的签名用到；缺了 exec 就会崩）
+    "List": List, "Dict": Dict, "Any": Any,
+    # ★ 本轮最关键的一个替身：策略写入的串行化锁。
+    #   缺了它，函数内的 `async with _POLICY_WRITE_LOCK` 会抛 NameError，
+    #   又被函数自己的 `except Exception` 吞掉 → 静默返回 False →
+    #   本套件 18 条断言全红，看起来像"断言过期"，实际是替身缺全局。
+    #   §0 的「引用但未绑定的全局名」自检就是为这种情况准备的（它会打印
+    #   缺少 ['_POLICY_WRITE_LOCK']），所以看到那种 FAIL 先去补替身，别改断言。
+    "_POLICY_WRITE_LOCK": asyncio.Lock(),
 }
 exec(compile(FN_SRC, str(SRC), "exec"), ns)   # noqa: S102 - 被测代码就是本仓库源码
 
@@ -343,6 +356,130 @@ got = asyncio.run(f.get_user("u1"))
 check("7d 成功 → 返回用户 dict 且带 Policy", got is u and got["Policy"]["SimultaneousStreamLimit"] == 5,
       str(got)[:120])
 check("7e 请求路径正确", f.calls[0][1] == "/emby/Users/u1", str(f.calls[0][:2]))
+
+print()
+print("=" * 78)
+print("8. 【H1/H2】策略写入串行化：读→写临界区内不得有其它协程插进来")
+print("=" * 78)
+# 为什么这条是核心不变量：POST .../Policy 是**整份替换**。若两个写入者的
+# GET→POST 交错，后写的那份会把先写的那份整份抹掉 ——
+#   · 管理员封禁 vs 用户点「显示/隐藏媒体库」→ 封禁被悄悄解开（H1）
+#   · 反向交错 → IsDisabled=true 且 kick_until=NULL → 永久锁死且不告警（H2）
+IN_FLIGHT = {"n": 0, "max": 0, "seq": []}
+
+
+async def serial_handler(method, endpoint, kw):
+    IN_FLIGHT["n"] += 1
+    IN_FLIGHT["max"] = max(IN_FLIGHT["max"], IN_FLIGHT["n"])
+    IN_FLIGHT["seq"].append(method)
+    # 主动让出控制权两次：没有锁的话，别的写入者必然在这里插进来
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    IN_FLIGHT["n"] -= 1
+    if method == "GET":
+        return Res(True, user_obj(copy.deepcopy(CUSTOM_POLICY)))
+    return Res(True, {})
+
+
+async def run_concurrent():
+    IN_FLIGHT.update({"n": 0, "max": 0, "seq": []})
+    f = fake(serial_handler)
+    results = await asyncio.gather(
+        f.emby_change_policy("u1", disable=True),
+        f.set_user_disabled("u1", True),
+        f.update_user_enabled_folder("u1", enabled_folder_ids=["f1"], enable_all_folders=False),
+        return_exceptions=True,
+    )
+    return f, results
+
+
+_f, _res = asyncio.run(run_concurrent())
+check("8a 三个写入者并发执行时，**没有任何两个请求重叠**（临界区真的互斥）",
+      IN_FLIGHT["max"] == 1, f"同时在飞的请求数峰值={IN_FLIGHT['max']}")
+check("8b 方法序列严格 GET/POST 交替（没有别的协程插进读改名窗口）",
+      IN_FLIGHT["seq"] == ["GET", "POST", "GET", "POST", "GET", "POST"],
+      str(IN_FLIGHT["seq"]))
+check("8c 三个写入者都成功返回 True", all(r is True for r in _res), str(_res))
+check("8d 每个 POST 的 body 都是**非空**策略（不是用空 dict 整份覆盖）",
+      all(bool(b) for _m, _e, b in posts(_f)) and len(posts(_f)) == 3,
+      str([(m, e, bool(b)) for (m, e, b) in posts(_f)]))
+
+
+# 传入的 current_policy（陈旧快照）必须被**忽略**并重新读最新策略。
+# 这正是 H1 的复现路径：用户在管理员封禁前抓到的快照里 IsDisabled=false，
+# 若被采纳，这次写入就把管理员的封禁覆盖回 false。
+# 服务端现在的真实策略：管理员刚刚封了他（IsDisabled=true）
+async def admin_disabled_handler(method, endpoint, kw):
+    if method == "GET":
+        fresh = copy.deepcopy(CUSTOM_POLICY)
+        fresh["IsDisabled"] = True
+        return Res(True, user_obj(fresh))
+    return Res(True, {})
+
+
+async def stale_snapshot_write():
+    f = fake(admin_disabled_handler)
+    stale = copy.deepcopy(CUSTOM_POLICY)
+    stale["IsDisabled"] = False                      # 陈旧快照：抓到它时还没封
+    LOGS.clear()
+    ok = await f.update_user_enabled_folder(
+        "u1", enabled_folder_ids=["f9"], current_policy=stale
+    )
+    return f, ok
+
+
+_f2, _ok2 = asyncio.run(stale_snapshot_write())
+_body = posts(_f2)[0][2] if posts(_f2) else {}
+check("8e 传入 current_policy 时**重新读**最新策略（陈旧快照不得被采纳）",
+      _body.get("IsDisabled") is True,
+      f"body IsDisabled={_body.get('IsDisabled')}（True=读了最新策略，False=用了陈旧快照→把封禁解开了）")
+check("8f 自己负责的字段仍按参数写入（EnabledFolders）",
+      _body.get("EnabledFolders") == ["f9"], str(_body.get("EnabledFolders")))
+check("8g 忽略 current_policy 时记 warning（让调用点知道这个捷径没了）",
+      any(lvl == "warning" and "current_policy" in m for lvl, m in LOGS), str(LOGS[-3:]))
+check("8h 写入成功返回 True", _ok2 is True, str(_ok2))
+
+print()
+print("=" * 78)
+print("9. 读不到策略 → 拒绝写入（零 POST），绝不用空 dict 整份覆盖")
+print("=" * 78)
+for _label, _payload in (("Policy 键缺失", {"Id": "u1", "Name": "toe"}),
+                         ("Policy 为空 dict", user_obj({}))):
+    _f3 = fake(get_handler(Res(True, _payload)))
+    _ok3 = asyncio.run(_f3.update_user_enabled_folder("u1", enabled_folder_ids=["f1"]))
+    check(f"9[{_label}] 拒绝写入：返回 False 且零 POST",
+          _ok3 is False and posts(_f3) == [],
+          f"ok={_ok3} posts={len(posts(_f3))}")
+    check(f"9[{_label}] 记 error 级日志（不能静默）",
+          any(lvl == "error" for lvl, _m in LOGS), str(LOGS[-2:]))
+
+_f4 = fake(get_handler(Res(False, error="HTTP 500")))
+_ok4 = asyncio.run(_f4.update_user_enabled_folder("u1", enabled_folder_ids=["f1"]))
+check("9[GET 失败] 拒绝写入：返回 False 且零 POST",
+      _ok4 is False and posts(_f4) == [], f"ok={_ok4} posts={len(posts(_f4))}")
+
+print()
+print("=" * 78)
+print("10. 清 kick_until 失败必须记 ERROR（静默失败会让巡检自动解封管理员的封禁）")
+print("=" * 78)
+# sql_update_emby 在**匹配不到行**时静默返回 False。若这里不记 ERROR，运维就
+# 完全看不到"标记残留 → 启动自恢复/周期巡检把管理员的封禁当成遗留临时封禁
+# 自动解封"这条链路（H2 的告警面）。
+DB_STATE["ok"] = False
+LOGS.clear(); DB_WRITES.clear()
+_f5 = fake(get_handler(Res(True, user_obj(copy.deepcopy(CUSTOM_POLICY)))))
+_ok5 = asyncio.run(_f5.emby_change_policy("u1", disable=True))
+_errs = [m for lvl, m in LOGS if lvl == "error"]
+check("10a 策略已写入 → 仍返回 True（清理失败不等于写入失败）", _ok5 is True, str(_ok5))
+check("10b 清 kick_until 失败 → 至少一条 error 级日志", len(_errs) >= 1, str(LOGS[-3:]))
+check("10c error 文案点明后果（后续巡检 / 自动解封 / 人工核对）",
+      any(("自动解封" in m and "巡检" in m) for m in _errs), str(_errs)[:240])
+check("10d 这条不得被降级成 debug/warning（否则又变成静默失败）",
+      not any("自动解封" in m for lvl, m in LOGS if lvl in ("debug", "warning")),
+      str([(lvl, m[:60]) for lvl, m in LOGS]))
+check("10e 确实尝试清了 kick_until（写库被调用且目标是该 embyid）",
+      DB_WRITES == [(("embyid", "u1"), {"kick_until": None})], str(DB_WRITES))
+DB_STATE["ok"] = True
 
 print()
 print("=" * 78)

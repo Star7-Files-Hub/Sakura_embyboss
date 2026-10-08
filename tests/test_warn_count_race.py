@@ -25,6 +25,8 @@ H1 回归测试：并发播放检测任务的「警告计数」丢失更新竞�
 
 import ast
 import asyncio
+import html
+import re
 import sys
 import textwrap
 import types
@@ -196,6 +198,10 @@ def make_ns(db, on_terminate=None, threshold=3, limit=2):
 
     ns["_schedule_kick_verify"] = _schedule_kick_verify
     ns["_now_str"] = lambda: "2026-10-04 22:00:00"
+    # 真实 escape_markdown（_mention 依赖；只用到 re / html）
+    ns["re"] = re
+    ns["html"] = html
+    exec(compile(extract(MSG_UTILS, "escape_markdown"), str(MSG_UTILS), "exec"), ns)
 
     # ── 2026-10-06 新增：check_concurrent_play_limit 现在会真的去「临时封禁踢流」 ──
     #
@@ -252,7 +258,12 @@ def make_ns(db, on_terminate=None, threshold=3, limit=2):
 # 新增停流路径后，check_concurrent_play_limit 会调用 kick_user_streams()，
 # 而 kick_user_streams 依赖 _utcnow()。把它们一起抽出来执行，才能继续做
 # 行为级验证（而不是只做源码字符串断言）。
-EXTRACTED_FUNCS = ("check_concurrent_play_limit", "kick_user_streams", "_utcnow")
+EXTRACTED_FUNCS = ("check_concurrent_play_limit", "kick_user_streams", "_utcnow",
+                   "_mention")
+
+# `_mention` 依赖真 `escape_markdown`。**不能**桩成 lambda s: s —— 那样"名字里的
+# Markdown 特殊字符被转义"就没有证据了。抽 msg_utils.py 里的真实纯函数。
+MSG_UTILS = SRC.parent.parent.parent / "func_helper/msg_utils.py"
 FN_SRC = "\n\n\n".join(extract(SRC, n) for n in EXTRACTED_FUNCS)
 
 
@@ -288,13 +299,16 @@ def env_selfcheck(ns):
 
     这正是在修本套件上一次的崩溃：新增了 kick_user_streams 调用、但抽取/替身
     没跟上，结果跑到一半抛 NameError，把「测试环境没搭好」伪装成「测试崩溃」。
-    现在改成提前一次性列出缺哪些名字，报 FAIL 而不是崩。
+    现在改成提前一次性列出缺哪些名字，报 FAIL 而不是崩；并且**返回缺失列表**，
+    调用方据此跳过本轮执行 —— 否则 NameError 会崩在汇总之前，把一条清晰的
+    "替身缺全局"变成一堆看不出原因的 traceback。
     """
     import builtins
     missing = sorted(n for n in referenced_globals(FN_SRC)
                      if n not in ns and not hasattr(builtins, n))
     check("环境自检：被测函数引用的全局在替身命名空间里都有定义", missing == [],
           f"缺少 {missing}")
+    return missing
 
 
 def build_fn(ns):
@@ -306,7 +320,10 @@ def build_fn(ns):
 def run_case(on_terminate, db, threshold=3):
     ns, calls, logs = make_ns(db, on_terminate=on_terminate, threshold=threshold)
     fn = build_fn(ns)          # 先把抽取的函数装进命名空间
-    env_selfcheck(ns)          # 再自检：还缺谁就一次说清，不要跑到一半 NameError
+    missing = env_selfcheck(ns)   # 再自检：还缺谁就一次说清，不要跑到一半 NameError
+    if missing:
+        print(f"  ⚠️ 替身缺全局 {missing}，跳过本轮执行（不崩，让汇总照常打印）")
+        return db, calls, logs
     asyncio.run(fn())
     return db, calls, logs
 
