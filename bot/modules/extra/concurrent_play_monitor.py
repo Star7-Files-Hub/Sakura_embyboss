@@ -26,7 +26,7 @@ from bot import bot, group, config, LOGGER
 from bot.func_helper.emby import emby
 # 模块本身也要引用：is_emby_admin() 是模块级函数（emby 单例上没有它）
 from bot.func_helper import emby as emby_mod
-from bot.func_helper.msg_utils import sendMessage
+from bot.func_helper.msg_utils import sendMessage, escape_markdown
 from bot.func_helper.utils import judge_admins
 from bot.sql_helper.sql_emby import sql_get_emby, sql_update_emby, Emby
 
@@ -96,8 +96,13 @@ _WARN_N_PLACEHOLDER = "\x00WARN_N\x00"
 # ══════════════════════════════════════════════════════════════════════════
 
 # 临时禁用保持多少秒再还原。
-# 实测客户端放弃播放的窗口是 5~67 秒，取 45 秒落在窗口内且不至于太久。
-_KICK_HOLD_SECONDS = 45
+#
+# 实测客户端放弃播放的窗口是 5~67 秒；**用户明确要求保持 3 分钟**（180 秒），
+# 远大于该窗口。取更长有两个实际好处：
+#   · 客户端"重试—失败—再重试"的退避可能跨过 45 秒，180 秒几乎不可能被它熬过去
+#   · 用户有足够时间意识到"我被踢了"，而不是刚被踢就立刻重连回来
+# 代价是被罚的用户有 3 分钟完全看不了片 —— 这是刻意的：违规的代价要能感知到。
+_KICK_HOLD_SECONDS = 180
 
 # 还原后的校验重试次数与间隔：写入成功 ≠ 真的生效，必须回读确认。
 _KICK_VERIFY_ATTEMPTS = 3
@@ -641,6 +646,28 @@ async def restore_pending_kicks(only_expired: bool = False) -> int:
     return restored
 
 
+def _mention(tg_id, name) -> str:
+    """
+    生成 Telegram 文本提及，用于在群通报里 **@ 到触发者本人**。
+
+    为什么必须有：群里只发通报而不 @ 人时，用户很可能**根本不知道**自己触发了
+    违规 —— 等他第 N 次超限直接被封号，才跑来问"为什么封我"。文本提及
+    （`tg://user?id=`）会给该用户推送通知，而且**不依赖 username**（多数用户没设
+    username，所以 `@用户名` 这条路走不通）。
+
+    两个不能忽略的细节：
+      · **名字必须转义**。bot 全局是 legacy Markdown（`ParseMode.MARKDOWN`），
+        名字里若含 `_ * ` [ ]`，整条消息的实体解析会坏掉，Telegram 直接 400
+        拒绝发送 —— 通报就整条发不出去了。用 `escape_markdown()`，它的字符集
+        正是为 legacy Markdown 收敛过的。
+      · 文本提及只对**群成员**产生通知；不在群里的人点它是个死链。所以调用方
+        不能把"已经 @ 过他了"当成"他一定看到了" —— 私信该发还得照发。
+    """
+    if not tg_id:
+        return str()
+    return f"[{escape_markdown(str(name or tg_id))}](tg://user?id={tg_id})"
+
+
 async def send_group_announcement(text: str):
     """
     在群内发送通报
@@ -806,9 +833,16 @@ async def check_concurrent_play_limit():
 
         # 构建违规信息
         now_str = _now_str()
+        # 群通报里**必须 @ 到触发者本人**，否则用户往往根本不知道自己违规了，
+        # 直到被封号才来问。没绑定 TG 时 @ 不了，就如实写明"未绑定"，
+        # 而不是静默留空让人以为漏了（见 _mention 的说明）。
+        if tg_id:
+            violator_line = f"🔔 触发者: {_mention(tg_id, user_name)}（TG: `{tg_id}`）\n"
+        else:
+            violator_line = f"🔔 触发者: `{user_name}`（**该账号未绑定 TG，无法 @ 通知**）\n"
         violation_msg = (
             f"⚠️ **同时播放限制警告**\n\n"
-            f"用户: `{user_name}` (TG: `{tg_id}`)\n"
+            f"{violator_line}"
             f"Emby ID: `{emby_user_id}`\n"
             f"当前播放流: **{stream_count}** 个 (限制: **{user_limit}** 个)\n"
             f"检测时间: {now_str}\n"

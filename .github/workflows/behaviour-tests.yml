@@ -31,6 +31,7 @@ jobs:
           - test_terminate_verify
           - test_temp_kick
           - test_emby_policy
+          - test_policy_write_race
           - test_kick_verify_userid
           - test_removal
           - test_backup_sends_config
@@ -41,7 +42,7 @@ jobs:
         #   uvloop~=0.17.0 —— 只发到 cp311，3.12 编译直接失败（实测 CI 红在这里）
         #   TgCrypto~=1.2.5 —— 只发到 cp311，是 Pyrogram 的硬依赖，3.12 得现编
         # 生产镜像用的是 python:3.10.11，所以这个集成套件只在 3.10 上跑；
-        # 其它 10 个套件（纯 stdlib + pydantic）仍然 3.10 / 3.12 双版本。
+        # 其它 11 个套件（纯 stdlib + pydantic）仍然 3.10 / 3.12 双版本。
         # 刻意用 exclude 而不是 if 跳过：不留「跑了个寂寞但显示绿」的空 job。
         exclude:
           - python-version: "3.12"

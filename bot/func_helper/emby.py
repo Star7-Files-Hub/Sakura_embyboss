@@ -109,6 +109,35 @@ def pwd_policy(embyid: str, stats: bool = False, new: str = None) -> Dict[str, A
     return policy
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+# 策略写入串行化锁（修「整份覆盖抹掉别人的改动」）
+# ══════════════════════════════════════════════════════════════════════════════
+#
+# `POST /emby/Users/{id}/Policy` 是**整份替换**语义：请求体里没有的字段会被重置
+# 成默认值，所以每次写入都必须「读最新策略 → 只改自己负责的字段 → 写回」。
+#
+# 问题在于这个读-改-写窗口一旦被另一个写入者插进来，**后写的一方就会把前者的
+# 改动抹掉**。本进程内至少有 5 个写入者：`emby_create`、`emby_block`、
+# `update_user_enabled_folder`、`set_user_disabled`、`emby_change_policy`，
+# 而 `update_user_enabled_folder` 的窗口里还夹着一次
+# `GET /Library/VirtualFolders`，实测窗口长达 **0.7~10 秒**。
+#
+# 已用真实代码 + 真实 Emby 复现的两个后果：
+#   · **管理员的封禁被悄悄解开** —— 普通用户点一次「🎬 显示/隐藏媒体库」，若管理员
+#     恰好在 `GET /Users/{id}` 与 `POST /Policy` 之间封禁该用户，这次写入就用 stale
+#     快照把 `IsDisabled` 覆盖回 `false`。
+#   · **永久锁死（更严重）** —— 反向交错会留下「`IsDisabled=true` 但 `kick_until`
+#     已被清空」的状态：`_restore_kick` 的接管护栏会跳过、`sql_get_pending_kicks()`
+#     也查不到（它只查 `kick_until IS NOT NULL`），于是**没有任何机制会再解封这个
+#     账号**，而且**群里不会有任何告警**（还原走的是成功分支）。
+#
+# 因此把本进程内所有策略写入的「读→写」临界区串行化。
+# 覆盖不到的：管理员直接用 Emby 后台改策略（跨进程），那种竞态无法从这边消除；
+# 但把窗口从「含一次 VirtualFolders 往返的 0.7~10 秒」压到「锁内的 GET→POST」，
+# 并且进程内写入者之间**不再互相覆盖**。
+_POLICY_WRITE_LOCK = asyncio.Lock()
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # 会话轮询窗口（2026-10-xx 瘦身）
 # ──────────────────────────────────────────────────────────────────────────────
@@ -693,37 +722,60 @@ class Embyservice(metaclass=Singleton):
         :param enabled_folder_ids: 启用的文件夹ID列表
         :param blocked_media_folders: 阻止的媒体库名称列表
         :param enable_all_folders: 是否启用所有文件夹
-        :param current_policy: 调用方**已经读到**的当前用户策略（可选）。
-            传入时不再单独 `GET /Users/{id}` 去读一次（去掉同一账号内的重复读）；
-            为 None（默认）时保持原行为，自己读一次。
-            加这个参数**有且只有一个目的**就是去重复读，所以现有调用点一律不用改，
-            行为逐字不变。
+        :param current_policy: **已废弃，传入即被忽略**。理由见下面「为什么不再接受
+            调用方传入的策略」。保留这个参数只是为了让现有签名继续可用。
         :return: 是否成功
+
+        为什么不再接受调用方传入的策略
+        ------------------------------------------------------------------
+        这个参数原本是为了省掉一次 `GET /emby/Users/{id}`。但 `POST .../Policy` 是
+        **整份替换**，快照越旧，被抹掉的并发改动就越多。实测复现（真实代码 + 真实
+        Emby 4.10）：
+
+          · 普通用户点「🎬 显示/隐藏媒体库」→ 本函数在 `GET /Users/{id}` 与
+            `POST /Policy` 之间夹着一次 `GET /Library/VirtualFolders`，窗口实测
+            **0.7~10 秒**；管理员在此窗口内封禁该用户 → stale 快照把
+            `IsDisabled` 覆盖回 `false`，**管理员的封禁被悄悄解开**。
+          · 反向交错 → 留下「`IsDisabled=true` 但 `kick_until` 已清空」的
+            **永久锁死**：接管护栏跳过、`sql_get_pending_kicks()` 也查不到，
+            没有任何机制会解封，而且**群里不会告警**。
+
+        全仓库**没有任何调用点**传过 `current_policy`（已 grep 确认），所以去掉这个
+        捷径是**零性能代价**的。现在改为：在 `_POLICY_WRITE_LOCK` 内重新读一次最新
+        策略，只改自己负责的字段，再写回。
         """
         try:
-            if current_policy is not None:
-                # 调用方已提供策略：直接用，省掉一次 GET /emby/Users/{id}
-                current_policy = current_policy if isinstance(current_policy, dict) else {}
-            else:
-                # 首先获取当前用户策略
+            # 读-改-写必须在锁内，否则会被并发的策略写入者插入（见 _POLICY_WRITE_LOCK）。
+            async with _POLICY_WRITE_LOCK:
+                if current_policy is not None:
+                    LOGGER.warning(
+                        f"update_user_enabled_folder 收到 current_policy 参数，已忽略并改为"
+                        f"重新读取（整份覆盖语义下用旧快照会抹掉并发改动）: {emby_id}"
+                    )
+
+                # 必须在**紧邻写入之前**读，且读→写之间只允许有锁、不允许有别的 I/O。
+                # 原先的写法把这次读放在最前面，中间隔着 get_folder_ids_by_names()
+                # 的 /Library/VirtualFolders 往返 —— 那才是窗口长达 10 秒的原因。
                 user_result = await self._request('GET', f'/emby/Users/{emby_id}')
                 if not user_result.success:
                     LOGGER.error(f"获取用户信息失败: {emby_id} - {user_result.error}")
                     return False
-                
-                current_policy = user_result.data.get('Policy', {})
-            
-            # 更新策略中的文件夹访问设置
-            updated_policy = current_policy.copy()
-            updated_policy['EnableAllFolders'] = enable_all_folders
-            if blocked_media_folders is not None:
-                updated_policy['BlockedMediaFolders'] = blocked_media_folders
-            
-            if enabled_folder_ids is not None:
-                updated_policy['EnabledFolders'] = enabled_folder_ids
-            
-            # 发送更新请求
-            result = await self._request('POST', f'/emby/Users/{emby_id}/Policy', json=updated_policy)
+
+                fresh_policy = (user_result.data or {}).get('Policy', {})
+                if not isinstance(fresh_policy, dict) or not fresh_policy:
+                    # 读不到策略时**拒绝写入**：用空 dict 去整份覆盖会把该用户所有
+                    # 策略（含 IsDisabled）重置成默认值，比不写更糟。
+                    LOGGER.error(f"用户策略为空，拒绝写入媒体库设置: {emby_id}")
+                    return False
+
+                updated_policy = fresh_policy.copy()
+                updated_policy['EnableAllFolders'] = enable_all_folders
+                if blocked_media_folders is not None:
+                    updated_policy['BlockedMediaFolders'] = blocked_media_folders
+                if enabled_folder_ids is not None:
+                    updated_policy['EnabledFolders'] = enabled_folder_ids
+
+                result = await self._request('POST', f'/emby/Users/{emby_id}/Policy', json=updated_policy)
             if result.success:
                 LOGGER.info(f"成功更新用户策略: {emby_id} - EnableAllFolders: {enable_all_folders} - EnabledFolders: {enabled_folder_ids}")
                 return True
@@ -1011,22 +1063,25 @@ class Embyservice(metaclass=Singleton):
         :return: 是否写入成功（读不到原策略时**拒绝写入**，避免用不完整策略覆盖）
         """
         try:
-            user = await self.get_user(emby_id)
-            if not user:
-                LOGGER.error(f"无法读取用户策略，拒绝写入 IsDisabled={disabled}: {emby_id}")
-                return False
+            # 读→写必须在锁内：否则并发的整份覆盖（如 update_user_enabled_folder）
+            # 会拿着它读到的旧 IsDisabled 把这次写入抹掉。
+            async with _POLICY_WRITE_LOCK:
+                user = await self.get_user(emby_id)
+                if not user:
+                    LOGGER.error(f"无法读取用户策略，拒绝写入 IsDisabled={disabled}: {emby_id}")
+                    return False
 
-            policy = user.get("Policy")
-            if not isinstance(policy, dict) or not policy:
-                LOGGER.error(f"用户策略为空，拒绝写入 IsDisabled={disabled}: {emby_id}")
-                return False
+                policy = user.get("Policy")
+                if not isinstance(policy, dict) or not policy:
+                    LOGGER.error(f"用户策略为空，拒绝写入 IsDisabled={disabled}: {emby_id}")
+                    return False
 
-            if bool(policy.get("IsDisabled", False)) == bool(disabled):
-                LOGGER.info(f"用户 IsDisabled 已是 {disabled}，无需写入: {emby_id}")
-                return True
+                if bool(policy.get("IsDisabled", False)) == bool(disabled):
+                    LOGGER.info(f"用户 IsDisabled 已是 {disabled}，无需写入: {emby_id}")
+                    return True
 
-            policy["IsDisabled"] = bool(disabled)
-            result = await self._request('POST', f'/emby/Users/{emby_id}/Policy', json=policy)
+                policy["IsDisabled"] = bool(disabled)
+                result = await self._request('POST', f'/emby/Users/{emby_id}/Policy', json=policy)
             if result.success:
                 LOGGER.info(f"已写入 IsDisabled={disabled}: {emby_id}")
                 return True
@@ -1046,22 +1101,26 @@ class Embyservice(metaclass=Singleton):
         :return: 是否成功
         """
         try:
-            current_policy = {}
-            user_result = await self._request('GET', f'/emby/Users/{emby_id}')
-            if user_result.success:
-                current_policy = user_result.data.get("Policy", {}) if user_result.data else {}
-            else:
-                LOGGER.warning(f"获取用户当前策略失败，将使用默认策略更新: {emby_id} - {user_result.error}")
+            # 读→写必须在锁内：本函数是「整份覆盖」，读到的 EnableAllFolders /
+            # EnabledFolders / BlockedMediaFolders 来自这次 GET。若期间有别的写入者
+            # 改了策略，覆盖就会把对方的改动抹掉（反之亦然）。
+            async with _POLICY_WRITE_LOCK:
+                current_policy = {}
+                user_result = await self._request('GET', f'/emby/Users/{emby_id}')
+                if user_result.success:
+                    current_policy = user_result.data.get("Policy", {}) if user_result.data else {}
+                else:
+                    LOGGER.warning(f"获取用户当前策略失败，将使用默认策略更新: {emby_id} - {user_result.error}")
 
-            policy = create_policy(admin=admin, disable=disable)
-            if current_policy:
-                policy.update({
-                    "EnableAllFolders": current_policy.get("EnableAllFolders", False),
-                    "EnabledFolders": current_policy.get("EnabledFolders", []),
-                    "BlockedMediaFolders": current_policy.get("BlockedMediaFolders", policy.get("BlockedMediaFolders", [])),
-                })
+                policy = create_policy(admin=admin, disable=disable)
+                if current_policy:
+                    policy.update({
+                        "EnableAllFolders": current_policy.get("EnableAllFolders", False),
+                        "EnabledFolders": current_policy.get("EnabledFolders", []),
+                        "BlockedMediaFolders": current_policy.get("BlockedMediaFolders", policy.get("BlockedMediaFolders", [])),
+                    })
 
-            result = await self._request('POST', f'/emby/Users/{emby_id}/Policy', json=policy)
+                result = await self._request('POST', f'/emby/Users/{emby_id}/Policy', json=policy)
             if result.success:
                 # 【接管声明】任何一次显式的策略写入都意味着"这个用户的禁用状态
                 # 由本次调用负责"，所以必须作废可能还挂着的「临时封禁踢流」标记。
@@ -1079,6 +1138,18 @@ class Embyservice(metaclass=Singleton):
                 # 而不清掉自己刚落的标记，否则「临时封禁踢流」当场就自我作废了。
                 if sql_update_emby(Emby.embyid == emby_id, kick_until=None):
                     LOGGER.debug(f"已清除该用户的临时封禁踢流标记: {emby_id}")
+                else:
+                    # `sql_update_emby` 在**匹配不到行**时静默返回 False，不抛异常。
+                    # 后果很重：标记残留 → 启动自恢复（无条件）和周期巡检会把这次
+                    # **管理员封禁**当成遗留的临时封禁，几十秒后**自动解封**。
+                    # 最常见的原因是传入的 emby_id 与库中该用户的 Emby.embyid 不一致
+                    # （或该用户根本不在库里）。策略本身已写入，所以不能返回 False，
+                    # 但必须留下一条 ERROR 让运维能查到。
+                    LOGGER.error(
+                        f"策略已写入，但 kick_until 清除失败（embyid={emby_id} 在库中匹配不到行）。"
+                        f"若该用户此前有临时的踢流标记，后续巡检会把它当成遗留标记并**自动解封该账号**，"
+                        f"请人工核对这个用户的禁用状态"
+                    )
                 LOGGER.info(f"成功修改用户策略: {emby_id}")
                 return True
             else:
