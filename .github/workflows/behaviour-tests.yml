@@ -36,13 +36,14 @@ jobs:
           - test_removal
           - test_backup_sends_config
           - test_backup_recipient
+          - test_copy_text_behaviour
           - test_emby_limiter
         # test_emby_limiter 要装完整 requirements.txt，而其中两个包在 3.12 上
         # **没有 wheel**，只能源码编译：
         #   uvloop~=0.17.0 —— 只发到 cp311，3.12 编译直接失败（实测 CI 红在这里）
         #   TgCrypto~=1.2.5 —— 只发到 cp311，是 Pyrogram 的硬依赖，3.12 得现编
         # 生产镜像用的是 python:3.10.11，所以这个集成套件只在 3.10 上跑；
-        # 其它 11 个套件（纯 stdlib + pydantic）仍然 3.10 / 3.12 双版本。
+        # 其它 12 个套件（纯 stdlib + pydantic）仍然 3.10 / 3.12 双版本。
         # 刻意用 exclude 而不是 if 跳过：不留「跑了个寂寞但显示绿」的空 job。
         exclude:
           - python-version: "3.12"
@@ -59,7 +60,7 @@ jobs:
       - name: 安装测试依赖
         run: pip install "pydantic==2.1.1"
 
-      # 其它 10 套走「AST 抽取 + 桩模块」，只要 stdlib + pydantic。
+      # 其它 11 套走「AST 抽取 + 桩模块」，只要 stdlib + pydantic。
       # 但 test_emby_limiter.py 测的是**真实**的 register_throttle / register_queue /
       # 建号快路径，必须真正 `import bot` —— 于是需要运行期依赖 + 一份 config.json
       # （config.json 被 .gitignore 排除，CI 里要用模板现造一份）。
