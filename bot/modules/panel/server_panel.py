@@ -9,6 +9,7 @@ from bot.func_helper.emby import emby
 from bot.func_helper.filters import user_in_group_on_filter
 from bot.sql_helper.sql_emby import sql_get_emby
 from bot.func_helper.fix_bottons import cr_page_server
+from bot.func_helper.copy_text import editMessageWithCopy
 from bot.func_helper.msg_utils import callAnswer, editMessage
 
 
@@ -58,4 +59,6 @@ async def server(_, call):
            f'{server_info}' \
            f'· 🎬 在线 | **{online}** 人\n\n' \
            f'**· 🌏 [{(datetime.now(timezone(timedelta(hours=8)))).strftime("%Y-%m-%d %H:%M:%S")}]**'
-    await editMessage(call, text, buttons=keyboard)
+    # iOS 上等宽文字点一下不复制（只有 Android/桌面版会），所以额外挂一个 copy_text 按钮；
+    # pwd 为「空」时不挂。失败会自动回退 editMessage，行为与改造前一致。
+    await editMessageWithCopy(call, text, buttons=keyboard, copy_text=None if pwd == '空' else pwd)
