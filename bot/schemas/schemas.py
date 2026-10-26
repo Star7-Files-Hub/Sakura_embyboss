@@ -95,6 +95,7 @@ class Open(BaseModel):
     leave_ban: bool
     uplays: bool = True
     checkin_reward: Optional[List[int]] = [1, 10]
+    checkin_rewards: Optional[List[List[Union[int, float]]]] = [[1, 45], [2, 30], [3, 15], [4, 7], [5, 3]]
     exchange_cost: int = 300
     whitelist_cost: int = 9999
     invite_cost: int = 1000

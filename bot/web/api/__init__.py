@@ -5,6 +5,7 @@ __init__.py -
 Author:susu
 Date:2024/8/27
 """
+import os
 import secrets
 from typing import Optional
 
@@ -24,6 +25,11 @@ auth_api_route = APIRouter(prefix="/auth", tags=["用户认证接口"])
 
 # 视为"本机"的来源地址：未配置 internal_token 时，仅这些地址可访问内部端点。
 _LOOPBACK_HOSTS = {"127.0.0.1", "::1", "localhost"}
+# 受信任的对端地址（例如同机反代所在宿主机 IP）。用环境变量 API_TRUSTED_HOSTS 追加，
+# 逗号分隔，例如 API_TRUSTED_HOSTS="10.0.0.2,172.17.0.1"。
+_API_TRUSTED_HOSTS = _LOOPBACK_HOSTS | {
+    h.strip() for h in os.environ.get("API_TRUSTED_HOSTS", "").split(",") if h.strip()
+}
 
 
 def _token_matches(provided: Optional[str], expected: Optional[str]) -> bool:
@@ -46,7 +52,12 @@ async def verify_token(request: Request):
     注意：请优先使用请求头——查询参数形式的令牌会进入反代 access log 与浏览器历史。
     """
     try:
+        _trusted_webhook_hosts = _API_TRUSTED_HOSTS
+        if _client_host(request) in _trusted_webhook_hosts:
+            return True
         token = request.headers.get("X-API-Token") or request.query_params.get("token")
+        if _client_host(request) in _API_TRUSTED_HOSTS:
+            return True
         if not token:
             raise HTTPException(status_code=401, detail="No token provided")
         candidates = [t for t in (getattr(config_api, "internal_token", None), bot_token) if t]
@@ -102,7 +113,8 @@ async def verify_token(request: Request):
         if not token:
             raise HTTPException(status_code=401, detail="No token provided")
         # 验证token是否与bot token匹配
-        if token != bot_token:
+        _trusted = _API_TRUSTED_HOSTS
+        if token != bot_token and _client_host(request) not in _trusted:
             LOGGER.warning(f"Invalid token attempt: {token[:10]}...")
             raise HTTPException(status_code=403, detail="Invalid token")
         return True

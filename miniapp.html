@@ -1,0 +1,396 @@
+<!doctype html>
+<html lang="zh-CN" class="booting">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#eaf3fd">
+<title>会员中心</title>
+<script src="telegram-web-app.js"></script>
+<link rel="stylesheet" href="miniapp.css?v=1792987978">
+</head>
+<body>
+<div class="glow"></div>
+<header class="topbar" id="topBar" role="button" title="刷新页面">
+  <img class="logo-lg" src="img/logo.png" alt="茶百道">
+  <div class="btext">
+    <img class="brand-cn" src="img/brand_cn.png" alt="茶百道">
+    <span class="brand-en">Chapanda</span>
+  </div>
+</header>
+<main class="wrap">
+
+<section class="page on" id="pgHome">
+
+  <section class="bigcard a" id="tierBar">
+    <div class="wlvPill" id="uWatch">LV1</div>
+    <div class="trow">
+      <div class="avatar" id="uAva">K</div>
+      <div class="tmain">
+        <div class="tname" id="uName">会员</div>
+      </div>
+    </div>
+    <div class="tline"></div>
+    <div class="tdesc"><b class="tlv"><img class="lvico" id="lvIco" src="img/lv/vip.png?v=5" alt=""><span class="tlvTx" id="uLevel">尊贵白名单</span></b><span class="tx" id="rightDesc">永久有效 · 4 路同播 · 优先响应 · 专属线路</span></div>
+  </section>
+  <div class="duo three stRings" id="statsBar">
+    <button class="dc glass rcell" type="button" data-sp="points">
+      <span class="rg" id="rgCredit" style="--p:16"><b id="sCredit">156</b></span>
+      <span class="dl">奶茶</span>
+    </button>
+    <button class="dc glass rcell" type="button" data-sp="watch">
+      <span class="rg" id="rgWatch" style="--p:71"><b id="sWatch">42.5<i>h</i></b></span>
+      <span class="dl">近 30 天观影</span>
+    </button>
+    <button class="dc glass rcell" type="button" data-sp="playing" id="concBox">
+      <span class="rg onair" id="rgConc" style="--p:0"><b id="sConc">0<i>/4</i></b></span>
+      <span class="dl" id="concLbl">正在播放</span>
+    </button>
+  </div>
+
+  <section class="sec glass lvcard" id="medalProg">
+    <div class="lvtop">
+      <i class="mico" id="mIco"></i>
+      <div class="lvtx">
+        <div class="lvname" id="mName">茶韵名家</div>
+        <div class="lvsub" id="mSub">累计 43.5 小时 · 距 茶道宗师 还差 6.5 小时</div>
+        <div class="mbar"><i id="mBar" style="width:74%"></i></div>
+      </div>
+      <a class="lvbook" id="qMedal2">图鉴 ›</a>
+    </div>
+  </section>
+
+  <div class="libBar" id="libBar">
+    <div class="libTag"><b id="libEp">--</b><span class="libL">今日更新剧集</span></div>
+    <div class="libTag"><b id="libMv">--</b><span class="libL">今日更新电影</span></div>
+    <div class="libTag"><b id="libAll">--</b><span class="libL">总资源数量</span></div>
+  </div>
+
+  <section class="sec glass">
+    <div class="secHd">账号信息</div>
+    <div class="rows">
+      <div class="row"><span>账户状态</span><b class="ok" id="uState">正常</b></div>
+      <div class="row"><span>账户权益</span><b id="uRight">尊贵白名单</b></div>
+      <div class="row"><span>注册时间</span><b id="uCr">2026-08-15</b></div>
+    </div>
+  </section>
+
+  <section class="sec glass">
+    <div class="secHd">最近观看<span class="cnt"></span></div>
+    <div class="posters" id="recent"></div>
+  </section>
+
+  <section class="sec glass quick three">
+    <a class="qi" id="qAcct"><svg viewBox="0 0 24 24"><circle cx="12" cy="8.2" r="3.9"/><path d="M4.8 20.2c0-3.6 3.2-6 7.2-6s7.2 2.4 7.2 6"/></svg><span>我的账户</span></a>
+    <a class="qi" id="qDev"><svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="13" rx="2.5"/><path d="M9 21h6M12 17v4"/></svg><span>我的设备</span></a>
+    <a class="qi" id="qMedal"><svg viewBox="0 0 24 24"><circle cx="12" cy="9.5" r="4.6"/><path d="M8.6 13.6 7.2 21l4.8-2.4L16.8 21l-1.4-7.4"/></svg><span>我的称号</span></a>
+  </section>
+</section>
+<section class="page" id="pgRank">
+  <header class="hd"><div class="bname">排行榜</div><span class="live"><i></i>实时更新</span></header>
+
+  <div class="rtabs glass" id="rankTabs">
+    <button class="on" data-board="watch">观影榜</button>
+    <button data-board="point">奶茶榜</button>
+  </div>
+
+  <div class="rsub">
+    <div class="rchips" id="rankChips">
+      <button class="on" data-span="today">今日</button>
+      <button data-span="yest">昨日</button>
+      <button data-span="week">近7天</button>
+    </div>
+    <div class="rdate" id="rankDate" hidden><i class="dot"></i>2026-10-26 · 截至 03:55（北京时间）</div>
+  </div>
+
+  <section class="pod" id="podium"></section>
+
+  <section class="sec glass rlist" id="rankCard">
+    <div class="rlistHd"><b id="rankTitle">观影榜</b><span id="rankSub">今日 TOP 10</span></div>
+    <div id="rankList"></div>
+  </section>
+
+  <div class="mebar glass" id="meBar">
+    <span class="ml">我的排名</span>
+    <b id="meRk">#48</b>
+    <i id="meVal">12分钟</i>
+  </div>
+</section>
+
+<section class="page" id="pgLine">
+  <section class="sec glass rules" id="rulesCard">
+    <div class="rulesTag">必读</div>
+    <div class="ruTop"><b>茶百道 · 使用规范</b><span>共建良好观影环境 · 感谢您的配合</span></div>
+    <div class="ruList" id="rulesHome"></div>
+  </section>
+  <section class="sec glass" id="credCard">
+    <div class="dmHd"><b>Emby 账号</b></div>
+    <div class="credRow">
+      <div class="crL"><span>用户名</span><b id="credUser">—</b></div>
+      <button class="copyBtn sm" id="cpUser" type="button">复制</button>
+    </div>
+    <div class="credRow">
+      <div class="crL"><span>密码</span><b id="credPwd">••••••</b></div>
+      <button class="miniBtn" id="eyePwd" type="button">显示</button>
+      <button class="copyBtn sm" id="cpPwd" type="button">复制</button>
+    </div>
+    <p class="domTip">密码仅用于登录 Emby 客户端，请勿分享给他人</p>
+  </section>
+
+  <section class="sec glass" id="domCard">
+    <div class="dmHd"><b>Emby 服务器地址</b><button class="miniBtn" id="btnSpeed" type="button">重新测速</button></div>
+    <div id="domList"></div>
+    <p class="domTip" id="domTip"></p>
+  </section>
+
+
+</section>
+<section class="page" id="pgSign">
+  <header class="hd"><div class="bname">签到</div></header>
+  <section class="sec glass sign-top">
+    <div class="big" id="signStreak">0</div>
+    <div class="rv">连续签到天数</div>
+    <button class="btn primary" id="btnSign">今日签到</button>
+  </section>
+  <section class="sec glass balcard" id="balCard">
+    <div class="balL">
+      <div class="balT">我的奶茶</div>
+      <div class="balV"><b id="balNum">0</b><i>奶茶</i></div>
+    </div>
+    <button class="useBtn" id="btnUse" type="button" data-open-shop="1">使用</button>
+  </section>
+  <section class="sec glass">
+    <div class="secHd"><b>热门商品</b></div>
+    <div class="shopRow" id="shopRow"></div>
+  </section>
+  <section class="sec glass">
+    <div class="secHd"><b>本月记录</b><span id="signCount">12 天</span></div>
+    <div class="cal" id="cal"></div>
+  </section>
+</section>
+<section class="page" id="pgSet">
+  <header class="hd"><div class="bname">设置</div><span class="live"><i></i>EmbyBoss</span></header>
+  <section class="sec glass setUser" id="setUser"></section>
+  <div id="setBody"></div>
+</section>
+</main>
+
+<!-- ===== 设置页操作弹层 ===== -->
+<div class="sheet ash" id="actSheet" aria-hidden="true">
+  <div class="sheetBg" data-ashclose="1"></div>
+  <div class="sheetPanel">
+    <div class="grab"></div>
+    <div class="sheetHd"><b class="sh-t" id="ashT">操作</b><button class="sh-x" type="button" data-ashclose="1">&times;</button></div>
+    <p class="ashD" id="ashD"></p>
+    <div class="ashF" id="ashF"><input id="ashI" type="text" autocomplete="off" placeholder=""></div>
+    <p class="ashE" id="ashE"></p>
+    <div class="ashBtns">
+      <button class="ashCancel" type="button" data-ashclose="1">取消</button>
+      <button class="ashOk" id="ashOk" type="button">确认</button>
+    </div>
+  </div>
+</div>
+
+<!-- ===== 全屏页：我的账户 ===== -->
+<div class="fs" id="fsAcct" aria-hidden="true">
+  <header class="fsHd"><b>我的账户</b></header>
+  <div class="fsBody">
+    <section class="sec glass fsUser">
+      <div class="avatar" id="acAva">K</div>
+      <div class="fsu"><div class="fsn" id="acName">kaixin</div><div class="fsh" id="acSub">Emby 账户 · 普通用户</div></div>
+      <span class="fpill" id="acState">正常</span>
+    </section>
+    <section class="sec glass">
+      <div class="fsSecHd">账户信息</div>
+      <div class="fsRows" id="acInfo"></div>
+    </section>
+    <section class="sec glass">
+      <div class="fsSecHd">安全与登录</div>
+      <div class="fsRows" id="acSafe"></div>
+    </section>
+  </div>
+</div>
+
+<!-- ===== 全屏页：我的设备 ===== -->
+<div class="fs" id="fsDev" aria-hidden="true">
+  <header class="fsHd"><b>我的设备</b></header>
+  <div class="fsBody">
+    <section class="sec glass">
+      <div class="fsSecHd">正在播放<span class="cnt" id="devLiveCnt">0 台</span></div>
+      <div class="devs" id="devLive"></div>
+    </section>
+    <section class="sec glass">
+      <div class="fsSecHd">播放过的设备<span class="cnt" id="devHistCnt">0 台 · 0 个 IP</span></div>
+      <div class="devs" id="devHist"></div>
+    </section>
+    <p class="fsTip">发现异常请及时修改密码</p>
+  </div>
+</div>
+
+<!-- ===== 全屏页：我的称号 ===== -->
+<div class="fs" id="fsMedal" aria-hidden="true">
+  <header class="fsHd"><b>我的称号</b></header>
+  <div class="fsBody">
+    <section class="sec glass" id="mdHero"></section>
+    <section class="sec glass">
+      <div class="fsSecHd">升级进度<span class="cnt">按累计观看时长</span></div>
+      <div class="lvlist" id="lvList"></div>
+    </section>
+    <p class="fsTip">只升不降 · 升级时机器人会私信通知 · 勋章仅做荣誉展示</p>
+  </div>
+</div>
+
+<!-- ===== 全屏页：使用规范大图 ===== -->
+<div class="fs" id="fsRules" aria-hidden="true">
+  <header class="fsHd"></header>
+  <div class="fsBody rulesBody">
+    <div class="ruTop big"><b>茶百道 · 使用规范</b><span>共建良好观影环境 · 感谢您的配合</span></div>
+    <div class="ruList full" id="rulesFull"></div>
+  </div>
+</div>
+
+<!-- ===== 全屏页：统计详情（奶茶 / 观影 / 正在播放） ===== -->
+<div class="fs" id="fsStat" aria-hidden="true">
+  <header class="fsHd"><b id="spTitle">奶茶明细</b></header>
+  <div class="fsBody" id="spBody"></div>
+</div>
+
+<!-- ===== 全屏页：兑换商店 ===== -->
+<div class="fs" id="fsShop" aria-hidden="true">
+  <header class="fsHd"><b>兑换码</b></header>
+  <div class="fsBody">
+    <div class="shopBal glass">
+      <div class="sbL"><span>我的奶茶</span><b id="shopBal">0</b><i id="shopUnit">奶茶</i></div>
+      <div class="sbR" id="shopTip">签到、观影、邀请都能攒奶茶</div>
+    </div>
+    <section class="sec glass">
+      <div class="fsSecHd">输入兑换码<span class="cnt">与机器人「兑换」一致</span></div>
+      <div class="rdWrap">
+        <input id="rdCode" class="rdInput" type="text" placeholder="请输入兑换码" autocomplete="off" autocapitalize="characters" spellcheck="false">
+        <button id="rdBtn" class="rdBtn" type="button">立即兑换</button>
+      </div>
+      <div class="rdMsg" id="rdMsg"></div>
+    </section>
+    <section class="sec glass">
+      <div class="fsSecHd">兑换码类型</div>
+      <div class="rdList">
+        <div class="rdItem"><b>续期码</b><span>按天数顺延会员有效期；已过期则从今天重新计算</span></div>
+        <div class="rdItem"><b>白名单码</b><span>升级为尊贵白名单：永久有效、4 路同播、专属线路</span></div>
+        <div class="rdItem"><b>分区码</b><span>解锁指定媒体分区，到期自动关闭</span></div>
+      </div>
+    </section>
+    <p class="fsTip">兑换码一次性使用，兑换后立即生效</p>
+  </div>
+</div>
+
+<div class="sheet" id="medalSheet" aria-hidden="true">
+  <div class="sheetBg" data-close="1"></div>
+  <div class="sheetPanel">
+    <div class="grab"></div>
+    <div class="sheetHd">
+      <div class="sh-t"><b>观影勋章图鉴</b><span>按 Emby 累计观看时长自动发放 · 只升不降</span></div>
+      <button class="sh-x" data-close="1" type="button">✕</button>
+    </div>
+    <div class="mList" id="mList"></div>
+    <div class="shFt">不到 1 小时显示为「新人观众」· 勋章只做荣誉展示，不加成奶茶 · 升级时机器人会私信通知</div>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<nav class="tabbar"><div class="bar">
+  <a class="tab on" data-pg="pgHome"><i><svg viewBox="0 0 24 24"><path d="M4 10.5 12 4l8 6.5V19a1 1 0 0 1-1 1h-4v-5h-6v5H5a1 1 0 0 1-1-1z"/></svg></i><b>首页</b></a>
+  <a class="tab" data-pg="pgRank"><i><svg viewBox="0 0 24 24"><path d="M5 20V10M12 20V4M19 20v-7"/></svg></i><b>排行</b></a>
+  <a class="tab" data-pg="pgLine"><i><img class="tablogo" src="img/logo_tab.png" alt=""></i><b>规范</b></a>
+  <a class="tab" data-pg="pgSign"><i><svg viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="16" rx="3"/><path d="M8 3v4M16 3v4M3 10h18M9 15l2 2 4-4"/></svg></i><b>签到</b></a>
+  <a class="tab" data-pg="pgSet"><i><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3.2"/><path d="M19.4 15a1.6 1.6 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.6 1.6 0 0 0-1.8-.3 1.6 1.6 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.6 1.6 0 0 0-1-1.5 1.6 1.6 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.6 1.6 0 0 0 .3-1.8 1.6 1.6 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.6 1.6 0 0 0 1.5-1 1.6 1.6 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.6 1.6 0 0 0 1.8.3H9a1.6 1.6 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.6 1.6 0 0 0 1 1.5 1.6 1.6 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.6 1.6 0 0 0-.3 1.8V9a1.6 1.6 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.6 1.6 0 0 0-1.5 1z"/></svg></i><b>设置</b></a>
+</div></nav>
+<script>
+(function(){
+  var tg=window.Telegram&&window.Telegram.WebApp;
+  var qs=new URLSearchParams(location.search);
+  var init=(tg&&tg.initData)||qs.get("initData")||"";
+  window.__INIT=init;
+  var _tgu=(tg&&tg.initDataUnsafe&&tg.initDataUnsafe.user)||null;
+  if(!_tgu&&init){ try{ _tgu=JSON.parse(new URLSearchParams(init).get("user")||"null"); }catch(e){} }
+  window.__TGUSER=_tgu;
+  /* 启动遮罩：刷新时不再闪出占位数据 */
+  document.documentElement.classList.add("booting");
+  var _bs=document.createElement("style");
+  _bs.textContent="html.booting{background:radial-gradient(120% 90% at 50% 0%,#eef6ff 0%,#e6f0fa 45%,#dcebf8 100%)}"
+   +"html.booting body{visibility:hidden}"
+   +"html.booting .tabbar,html.booting .tabbar *{display:none!important}"
+   +"#bootMask{position:fixed;inset:0;z-index:9999;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:13px}"
+   +"#bootMask img{width:58px;height:58px;border-radius:17px;box-shadow:0 10px 26px rgba(12,68,124,.18);animation:bp 1.3s ease-in-out infinite}"
+   +"#bootMask b{font-size:10.5px;letter-spacing:.24em;color:#93aabf;font-weight:800}"
+   +"@keyframes bp{0%,100%{transform:translateY(0);opacity:.85}50%{transform:translateY(-5px);opacity:1}}";
+  document.head.appendChild(_bs);
+  var _bm=document.createElement("div"); _bm.id="bootMask";
+  _bm.innerHTML='<img src="img/logo.png" alt=""><b>CHAPANDA</b>';
+  document.documentElement.appendChild(_bm);
+  function unboot(){
+    document.documentElement.classList.remove("booting");
+    var m=document.getElementById("bootMask"); if(m&&m.parentNode)m.parentNode.removeChild(m);
+  }
+  if(tg){try{tg.ready();tg.expand();tg.setHeaderColor("#eaf3fb");tg.setBackgroundColor("#eaf3fb");}catch(e){}}
+  function load(){
+    var s=document.createElement("script"); s.src="miniapp.js?v=1792987978";
+    s.onload=function(){ unboot(); if(window.__FAIL&&window.MC&&window.MC.fail) window.MC.fail(window.__FAIL); };
+    document.body.appendChild(s);
+  }
+  function esc(t){return String(t==null?"":t).replace(/[&<>"]/g,function(c){
+    return {"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c];});}
+  function gate(o){
+    unboot();
+    var btn=o.btn?'<div class="gb" id="gbtn">'+esc(o.btnText||"打开")+'</div>':'';
+    var foot=o.foot?'<div class="gf">'+esc(o.foot)+'</div>':'';
+    document.body.innerHTML='<style>'
+      +'html,body{margin:0;height:100%;background:radial-gradient(120% 90% at 50% 0%,#eef6ff 0%,#e6f0fa 45%,#dcebf8 100%)}'
+      +'.gw{min-height:100vh;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:26px 22px 40px;box-sizing:border-box}'
+      +'.gc{width:100%;max-width:330px;background:rgba(255,255,255,.82);border:1px solid rgba(255,255,255,.92);border-radius:26px;padding:26px 22px 22px;box-sizing:border-box;text-align:center;box-shadow:0 18px 48px rgba(12,68,124,.16),0 2px 6px rgba(12,68,124,.06);-webkit-backdrop-filter:blur(18px) saturate(1.4);backdrop-filter:blur(18px) saturate(1.4)}'
+      +'.gl{width:64px;height:64px;border-radius:20px;box-shadow:0 10px 26px rgba(12,68,124,.20);display:block;margin:0 auto}'
+      +'.gn{margin-top:13px;font-size:10.5px;letter-spacing:.22em;color:#95a8ba;text-transform:uppercase}'
+      +'.gt{margin-top:10px;font-size:20px;font-weight:800;color:#0c447c;letter-spacing:.3px}'
+      +'.gs{margin-top:9px;font-size:13px;line-height:1.75;color:#6d8296}'
+      +'.gb{margin-top:20px;height:46px;line-height:46px;border-radius:23px;font-size:14.5px;font-weight:700;color:#fff;background:linear-gradient(135deg,#2f8fe0,#0c5fae);box-shadow:0 10px 22px rgba(12,95,174,.26);cursor:pointer}'
+      +'.gb:active{opacity:.92;transform:scale(.985)}'
+      +'.gf{margin-top:14px;font-size:11.5px;color:#9aabbc;line-height:1.6}'
+      +'</style>'
+      +'<div class="gw"><div class="gc">'
+      +'<img class="gl" src="img/logo.png" alt="">'
+      +'<div class="gn">ChaPanda 会员中心</div>'
+      +'<div class="gt">'+esc(o.title)+'</div>'
+      +'<div class="gs">'+esc(o.sub)+'</div>'+btn+foot
+      +'</div></div>';
+    var b=document.getElementById("gbtn");
+    if(b&&o.btn){b.onclick=function(){
+      try{ if(tg&&tg.openTelegramLink&&o.btn.indexOf("https://t.me/")===0) tg.openTelegramLink(o.btn); else location.href=o.btn; }
+      catch(e){ location.href=o.btn; }
+    };}
+  }
+  var BOT="https://t.me/your_bot";
+  if(!init){
+    gate({title:"请在 Telegram 中打开",
+      sub:"会员中心需要在 Telegram 里使用。回到机器人，点击「会员中心」按钮即可进入。",
+      btn:BOT,btnText:"打开机器人"});
+    return;
+  }
+  fetch("api/profile",{headers:{"X-Tg-Init-Data":init},cache:"no-store"})
+    .then(function(r){return r.json();})
+    .then(function(d){
+      if(d&&d.ok){ window.__PROFILE=d; load(); return; }
+      if(d&&d.error==="not_registered"){
+        gate({title:"还没有开通账号",
+          sub:"这个 Telegram 账号还没有绑定 Emby。到机器人里发送 /start 即可开通，开通后回来重新打开会员中心。",
+          btn:BOT+"?start=start",btnText:"去机器人开通",foot:(d.tg?("TG ID "+d.tg+" · 把这个数字发给管理员"):"开通成功后请重新点击「会员中心」")});
+        return;
+      }
+      gate({title:"身份校验失败",
+        sub:"登录信息已过期或无效。请回到 Telegram 重新点击「会员中心」打开。",
+        btn:BOT,btnText:"回到机器人"});
+    })
+    .catch(function(){
+      gate({title:"网络异常",sub:"没能连上服务器，请检查网络后再试一次。",
+        btn:"javascript:location.reload()",btnText:"重新加载"});
+    });
+})();
+</script></body></html>

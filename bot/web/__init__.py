@@ -14,6 +14,13 @@ from starlette.responses import JSONResponse
 from .api import emby_api_route, user_api_route, auth_api_route
 from bot import api as config_api, LOGGER
 
+# 会员自助中心（Telegram Mini App）。加载失败不影响原有 API 服务。
+try:
+    from .miniapp import route as miniapp_route
+except Exception as _mini_err:  # noqa: BLE001
+    miniapp_route = None
+    LOGGER.error(f"【MiniApp】模块加载失败，会员中心不可用: {_mini_err}")
+
 __all__ = ["Web", "check"]
 
 # 单个请求体的最大字节数（默认 64KB）。
@@ -52,6 +59,8 @@ class Web:
         self.app.include_router(emby_api_route)
         self.app.include_router(user_api_route)
         self.app.include_router(auth_api_route)
+        if miniapp_route is not None:
+            self.app.include_router(miniapp_route)  # /app 会员中心
         # 配置 CORS 中间件
         # 默认不放行任何跨域来源（allow_origins 未配置时为空列表）。
         # 注意：本 API 的凭据是显式令牌而非 Cookie，因此不要使用 "*" 通配，

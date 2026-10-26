@@ -29,10 +29,8 @@ from pyrogram import enums
 from pyrogram.parser import Parser
 from pyrogram.types import CallbackQuery
 
-from bot import LOGGER, bot, bot_token, config
+from bot import LOGGER, bot_token
 from bot.func_helper.msg_utils import deleteMessage, editMessage
-
-_DEFAULT_PARSE_MODE = getattr(bot, "parse_mode", None) or enums.ParseMode.MARKDOWN
 
 API_ROOT = "https://api.telegram.org"
 HTTP_TIMEOUT = 20
@@ -59,7 +57,6 @@ _ENTITY_TYPES = {
     "MessageEntityCashtag": "cashtag",
     "MessageEntityBotCommand": "bot_command",
     "MessageEntityMentionName": "text_mention",
-    "InputMessageEntityMentionName": "text_mention",
     "MessageEntityCustomEmoji": "custom_emoji",
 }
 
@@ -73,7 +70,7 @@ def _has_media(message) -> bool:
 
 
 def _button_to_json(button):
-    """pyrogram 的 InlineKeyboardButton → Bot API 的按钮 JSON。"""
+    """pyrogram 的 InlineKeyboardButton → Bot API 的按钮 JSON。识别不了的返回 None（跳过）。"""
     text = getattr(button, "text", None)
     if not text:
         return None
@@ -113,43 +110,30 @@ def _button_to_json(button):
     if getattr(button, "callback_game", None) is not None:
         return {"text": text, "callback_game": {}}
 
-    LOGGER.warning(f"copy_text: 无法识别按钮 {text!r}")
+    LOGGER.warning(f"copy_text: 跳过无法识别的按钮 {text!r}")
     return None
 
 
 def _markup_to_json(markup, copy_value=None, label=COPY_BUTTON_LABEL):
     """原键盘 → Bot API 的 reply_markup JSON，并把「一键复制」按钮插到首行。"""
-    if markup is None:
-        raise ValueError("buttons 不能为空，无法在保留原键盘的同时安全追加复制按钮")
-
-    keyboard = getattr(markup, "inline_keyboard", None)
-    if keyboard is None:
-        raise ValueError("buttons 必须是 InlineKeyboardMarkup")
-
     rows = []
-    for row in keyboard:
-        converted = []
-        for button in row:
-            item = _button_to_json(button)
-            if item is None:
-                raise ValueError("buttons 包含 Bot API 不支持的按钮类型")
-            converted.append(item)
-        if converted:
-            rows.append(converted)
+    for row in (getattr(markup, "inline_keyboard", None) or []):
+        items = [item for item in (_button_to_json(b) for b in row) if item]
+        if items:
+            rows.append(items)
     if copy_value:
         rows.insert(0, [{"text": label, "copy_text": {"text": copy_value[:COPY_TEXT_MAX]}}])
     return {"inline_keyboard": rows}
 
 
-async def _markdown_to_entities(text: str, parse_mode=_DEFAULT_PARSE_MODE):
-    """用 pyrogram 自己的解析器把正文拆成 (纯文本, Bot API entities)。"""
-    if parse_mode is None:
-        parse_mode = _DEFAULT_PARSE_MODE
-    if parse_mode == enums.ParseMode.DISABLED:
-        return text, []
-    out = await Parser(None).parse(text, parse_mode)
+async def _markdown_to_entities(text: str):
+    """用 pyrogram 自己的解析器把 markdown 拆成 (纯文本, Bot API entities)。
+
+    实体偏移量是 UTF-16 单位，正是 Bot API 要求的格式；渲染结果与走 MTProto 时一致。
+    """
+    out = await Parser(None).parse(text, enums.ParseMode.MARKDOWN)
     entities = []
-    for entity in (out["entities"] or []):
+    for entity in out["entities"]:
         kind = _ENTITY_TYPES.get(type(entity).__name__) or _ENTITY_TYPES.get(getattr(entity, "type", None) or "")
         if not kind:
             LOGGER.warning(f"copy_text: 未映射的实体 {type(entity).__name__}，已跳过")
@@ -159,16 +143,19 @@ async def _markdown_to_entities(text: str, parse_mode=_DEFAULT_PARSE_MODE):
             item["url"] = getattr(entity, "url", None) or ""
         elif kind == "text_mention":
             user = getattr(entity, "user", None)
-            user_id = getattr(user, "id", None) or getattr(entity, "user_id", None)
-            if user_id is None:
+            if user is None:
                 continue
-            item["user"] = {"id": user_id}
+            item["user"] = {
+                "id": getattr(user, "id", 0),
+                "is_bot": bool(getattr(user, "is_bot", False)),
+                "first_name": getattr(user, "first_name", None) or "",
+            }
         elif kind == "pre":
             language = getattr(entity, "language", None)
             if language:
                 item["language"] = language
         elif kind == "custom_emoji":
-            custom_emoji_id = getattr(entity, "custom_emoji_id", None) or getattr(entity, "document_id", None)
+            custom_emoji_id = getattr(entity, "custom_emoji_id", None)
             if not custom_emoji_id:
                 continue
             item["custom_emoji_id"] = str(custom_emoji_id)
@@ -176,110 +163,61 @@ async def _markdown_to_entities(text: str, parse_mode=_DEFAULT_PARSE_MODE):
     return out["message"], entities
 
 
-def _proxy_url():
-    """返回 aiohttp 可用的 HTTP 代理地址，SOCKS 代理交给 Pyrogram 回退。"""
-    proxy = getattr(config, "proxy", None)
-    scheme = (getattr(proxy, "scheme", "") or "").lower()
-    if not scheme:
-        return None
-    if scheme not in {"http", "https"}:
-        raise ValueError("aiohttp 代理仅支持 HTTP/HTTPS；将回退到 Pyrogram 请求")
-    hostname = getattr(proxy, "hostname", None)
-    port = getattr(proxy, "port", None)
-    if not hostname or not port:
-        raise ValueError("HTTP 代理配置不完整")
-    auth = ""
-    username = getattr(proxy, "username", None)
-    password = getattr(proxy, "password", None)
-    if username:
-        from urllib.parse import quote
-        auth = quote(str(username), safe="")
-        if password is not None:
-            auth += ":" + quote(str(password), safe="")
-        auth += "@"
-    return f"{scheme}://{auth}{hostname}:{port}"
-
-
-def _redact(value):
-    message = str(value)
-    if bot_token:
-        message = message.replace(bot_token, "<redacted>")
-    proxy = getattr(config, "proxy", None)
-    secrets = (getattr(proxy, "username", None), getattr(proxy, "password", None))
-    for secret in secrets:
-        if secret:
-            from urllib.parse import quote
-            message = message.replace(str(secret), "<redacted>")
-            message = message.replace(quote(str(secret), safe=""), "<redacted>")
-    return message
-
-
 async def _api_call(method: str, payload: dict):
     """调一次 HTTP Bot API，返回 (是否成功, 失败原因)。"""
     url = f"{API_ROOT}/bot{bot_token}/{method}"
     try:
         timeout = aiohttp.ClientTimeout(total=HTTP_TIMEOUT)
-        proxy = _proxy_url()
         async with aiohttp.ClientSession(timeout=timeout) as session:
-            request = {"json": payload}
-            if proxy:
-                request["proxy"] = proxy
-            async with session.post(url, **request) as resp:
+            async with session.post(url, json=payload) as resp:
                 data = await resp.json(content_type=None)
     except Exception as e:
-        return False, _redact(f"{type(e).__name__}: {e}")
+        return False, f"{type(e).__name__}: {e}"
     if isinstance(data, dict) and data.get("ok"):
         return True, ""
     if isinstance(data, dict):
-        return False, _redact(data.get("description") or data)
-    return False, _redact(data)
+        return False, str(data.get("description") or data)
+    return False, str(data)
 
 
 async def editMessageWithCopy(message, text: str, buttons=None, copy_text=None,
-                              label: str = COPY_BUTTON_LABEL, timer=None,
-                              parse_mode=None):
+                              label: str = COPY_BUTTON_LABEL, timer=None):
     """编辑消息，并在键盘首行插入「一键复制」按钮。
 
     :param message: CallbackQuery 或 Message（与 editMessage 一致）
-    :param text: 正文（与 editMessage 一致）
+    :param text: markdown 正文（与 editMessage 一致）
     :param buttons: 原键盘 InlineKeyboardMarkup
     :param copy_text: 要复制的文本（通常就是密码）；为空则不插入按钮，直接走 editMessage
-    :param parse_mode: 正文解析模式；None 沿用 Bot 客户端默认模式，纯文本请传 ParseMode.DISABLED
     :return: True 成功 / False 未生效 / str 异常（与 editMessage 返回值语义一致）
     """
     if isinstance(message, CallbackQuery):
         message = message.message
 
-    mode = _DEFAULT_PARSE_MODE if parse_mode is None else parse_mode
-    copy_value = "" if copy_text is None else str(copy_text)
+    copy_value = "" if copy_text is None else str(copy_text).strip()
     chat_id = getattr(getattr(message, "chat", None), "id", None)
     message_id = getattr(message, "id", None)
     if not (bot_token and chat_id is not None and message_id is not None and copy_value):
-        return await editMessage(message, text, buttons=buttons, timer=timer, parse_mode=parse_mode)
+        return await editMessage(message, text, buttons=buttons, timer=timer)
 
     try:
-        parsed, entities = await _markdown_to_entities(text, mode)
-        markup = _markup_to_json(buttons, copy_value, label)
+        parsed, entities = await _markdown_to_entities(text)
     except Exception as e:
-        LOGGER.warning(f"copy_text: 构造 Bot API 请求失败 {type(e).__name__}: {_redact(e)}，回退 editMessage")
-        return await editMessage(message, text, buttons=buttons, timer=timer, parse_mode=parse_mode)
+        LOGGER.warning(f"copy_text: 解析 markdown 失败 {type(e).__name__}: {e}，回退 editMessage")
+        return await editMessage(message, text, buttons=buttons, timer=timer)
 
     payload = {
         "chat_id": chat_id,
         "message_id": message_id,
+        "reply_markup": _markup_to_json(buttons, copy_value, label),
     }
-    if markup is not None:
-        payload["reply_markup"] = markup
     if _has_media(message):
         method = "editMessageCaption"
         payload["caption"] = parsed
-        if mode != enums.ParseMode.DISABLED:
-            payload["caption_entities"] = entities
+        payload["caption_entities"] = entities
     else:
         method = "editMessageText"
         payload["text"] = parsed
-        if mode != enums.ParseMode.DISABLED:
-            payload["entities"] = entities
+        payload["entities"] = entities
         payload["link_preview_options"] = {"is_disabled": True}
 
     ok, why = await _api_call(method, payload)
@@ -291,5 +229,5 @@ async def editMessageWithCopy(message, text: str, buttons=None, copy_text=None,
     if "not modified" in why.lower():
         LOGGER.info(f"copy_text 未生效[消息无变化] chat={chat_id} msg={message_id}")
         return False
-    LOGGER.warning(f"copy_text 编辑失败[{method}] chat={chat_id} msg={message_id}: {_redact(why)}，回退 editMessage")
-    return await editMessage(message, text, buttons=buttons, timer=timer, parse_mode=parse_mode)
+    LOGGER.warning(f"copy_text 编辑失败[{method}] chat={chat_id} msg={message_id}: {why}，回退 editMessage")
+    return await editMessage(message, text, buttons=buttons, timer=timer)

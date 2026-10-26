@@ -1,14 +1,247 @@
+import re
+import time
+
+from sqlalchemy import text as _sql_text
 from cacheout import Cache
 from pykeyboard import InlineKeyboard, InlineButton
-from pyrogram.types import InlineKeyboardMarkup
+from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, WebAppInfo
 from pyromod.helpers import ikb, array_chunk
 from bot import chanel, main_group, bot_name, extra_emby_libs, tz_id, tz_ad, tz_api, tz_version, tz_username, tz_password, _open, sakura_b, \
     schedall, auto_update, fuxx_pitao, moviepilot, red_envelope, config, LOGGER
 from bot.func_helper import nezha_res
 from bot.func_helper.emby import emby
 from bot.func_helper.utils import members_info
+from bot.sql_helper import Session
 
 cache = Cache()
+
+# ============================================================================
+# Chapanda 面板公共数据：等级 LV1-LV7 / 专属称号 / 观影时长（2026-10-26）
+# ============================================================================
+PANEL_LV = [(0, '初尝茶香'), (4, '品茗入境'), (10, '匠心调茶'), (25, '茶韵名家'),
+            (50, '茶道宗师'), (100, '百道传奇'), (200, '巅峰至尊')]
+PANEL_PERM = {'a': '白名单', 'b': '普通', 'c': '已禁用', 'd': '未注册'}
+_panel_watch_cache = {}
+
+
+def panel_level(hours):
+    """累计观看小时 -> (等级序号, 等级名称)"""
+    try:
+        h = float(hours or 0)
+    except (TypeError, ValueError):
+        h = 0.0
+    idx = 0
+    for i, (need, _name) in enumerate(PANEL_LV):
+        if h >= need:
+            idx = i
+    return idx + 1, PANEL_LV[idx][1]
+
+
+def panel_title(tg):
+    """专属称号（小程序 miniapp_title 表，无则空串）"""
+    try:
+        with Session() as _s:
+            row = _s.execute(_sql_text('SELECT title FROM miniapp_title WHERE tg=:t LIMIT 1'),
+                             {'t': int(tg)}).first()
+        return (row[0] if row else '') or ''
+    except Exception as exc:
+        LOGGER.warning(f'【面板】读取称号失败: {exc}')
+        return ''
+
+
+_LV_TABLE_READY = [False]
+
+
+def _ensure_lv_table():
+    if _LV_TABLE_READY[0]:
+        return
+    try:
+        with Session() as _s:
+            _s.execute(_sql_text(
+                "CREATE TABLE IF NOT EXISTS panel_lv_override("
+                " tg BIGINT NOT NULL PRIMARY KEY,"
+                " lv INT NOT NULL,"
+                " updated DATETIME DEFAULT NULL"
+                ") DEFAULT CHARSET=utf8mb4"))
+            _s.commit()
+        _LV_TABLE_READY[0] = True
+    except Exception as exc:
+        LOGGER.warning(f'【面板】创建等级覆盖表失败: {exc}')
+
+
+def panel_lv_override(tg):
+    """人工指定等级（panel_lv_override 表），无则 None"""
+    if not tg:
+        return None
+    _ensure_lv_table()
+    try:
+        with Session() as _s:
+            row = _s.execute(_sql_text('SELECT lv FROM panel_lv_override WHERE tg=:t LIMIT 1'),
+                             {'t': int(tg)}).first()
+        val = int(row[0]) if row and row[0] else 0
+        return val if 1 <= val <= len(PANEL_LV) else None
+    except Exception as exc:
+        LOGGER.warning(f'【面板】读取等级覆盖失败: {exc}')
+        return None
+
+
+def panel_effective_level(tg, hours):
+    """等级=人工指定优先，否则按累计观看时长"""
+    no, name = panel_level(hours)
+    ov = panel_lv_override(tg)
+    if ov:
+        return ov, PANEL_LV[ov - 1][1]
+    return no, name
+
+
+def panel_perm(value):
+    """Emby lv（a/b/c/d 或已带中括号的中文）-> 纯文本权限名"""
+    raw = str(value or '').replace('**', '').replace('__', '').strip()
+    if raw == '正常':
+        return '普通'
+    return raw or '未知'
+
+
+def panel_expire(ex_text, perm):
+    """到期文案：白名单永久有效，其余去掉 markdown 记号"""
+    if perm == '白名单':
+        return '∞'
+    raw = str(ex_text or '').replace('**', '').replace('__', '').strip()
+    if raw in ('+ ∞', '+∞', '∞'):
+        return '∞'
+    return raw or '未知'
+
+
+async def panel_watch(embyid):
+    """Emby 播放统计 -> (累计小时, 近30天小时)，300 秒缓存"""
+    if not embyid:
+        return 0.0, 0.0
+    hit = _panel_watch_cache.get(embyid)
+    if hit and time.time() - hit[0] < 300:
+        return hit[1], hit[2]
+
+    async def _sum(extra=''):
+        q = ("SELECT SUM(PlayDuration - PauseDuration) AS s FROM PlaybackActivity "
+             "WHERE UserId = '" + str(embyid) + "'" + extra)
+        res = await emby._request('POST', '/emby/user_usage_stats/submit_custom_query',
+                                  json={'CustomQueryString': q, 'ReplaceUserId': False})
+        data = getattr(res, 'data', None)
+        if getattr(res, 'success', False) and data and data.get('results'):
+            try:
+                return round(float(data['results'][0][0] or 0) / 3600.0, 1)
+            except (TypeError, ValueError, IndexError):
+                return 0.0
+        return 0.0
+
+    total = recent = 0.0
+    try:
+        total = await _sum()
+    except Exception as exc:
+        LOGGER.warning(f'【面板】累计时长失败: {exc}')
+    try:
+        since = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(time.time() - 30 * 86400))
+        recent = await _sum(" AND DateCreated >= '" + since + "'")
+    except Exception as exc:
+        LOGGER.warning(f'【面板】近30天时长失败: {exc}')
+    _panel_watch_cache[embyid] = (time.time(), total, recent)
+    return total, recent
+
+
+async def panel_last_active(embyid):
+    """Emby 最后活动时间（UTC -> 北京时间）"""
+    if not embyid:
+        return '暂无记录'
+    try:
+        u = await emby.get_user(embyid)
+        raw = str((u or {}).get('LastActivityDate') or '')
+        m = re.match(r'(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})', raw)
+        if m:
+            from datetime import datetime as _dt, timedelta as _td
+            return (_dt(*[int(x) for x in m.groups()]) + _td(hours=8)).strftime('%Y-%m-%d %H:%M:%S')
+    except Exception as exc:
+        LOGGER.warning(f'【面板】上次活动失败: {exc}')
+    return '暂无记录'
+
+PANEL_BANNER = '**🍵 ChaPanda  好片相伴 观影愉快！**'
+PANEL_IDENTITY = {'白名单': '尊贵の白名单',
+                  '普通': '普通の会员',
+                  '已禁用': '已禁用',
+                  '未注册': '未注册'}
+
+
+def panel_identity(perm):
+    return PANEL_IDENTITY.get(perm, perm or '未知')
+
+
+async def panel_card(first=None, uid=None, lv='', ex='', us=0, name='',
+                     embyid=None, warn_count=None, link=True, footer=None):
+    """统一用户卡片（用户面板 / kk / start 共用）"""
+    perm = panel_perm(lv)
+    total_h, recent_h = await panel_watch(embyid)
+    lv_no, lv_name = panel_effective_level(uid, total_h)
+    title = panel_title(uid) if uid else ''
+    if warn_count is None:
+        warn_count = _warn_count_of(uid) if (uid and embyid) else '-'
+    warn_txt = '读取失败' if warn_count is None else warn_count
+    last = await panel_last_active(embyid)
+    w30 = int(round((recent_h or 0) * 60))
+    who = f'[{first}](tg://user?id={uid})' if (link and uid and first) else (first or '')
+    rows = [PANEL_BANNER]
+    if who:
+        rows.append(f'🍉 TG&名称 ｜ {who}')
+    rows.append(f'🎖️ 专属称号 ｜ Lv{lv_no} · {title or lv_name}')
+    if uid:
+        rows.append(f'🍒 识别のID ｜ {uid}')
+    rows.append(f'💠 当前身份 ｜ {panel_identity(perm)}')
+    rows.append(f'🍥 持有奶茶 ｜ {0 if us is None else us}')
+    rows.append(f'💫 账号名称 ｜ {name or "未注册"}')
+    rows.append(f'🚨 到期时间 ｜ {panel_expire(ex, perm)}')
+    rows.append(f'⚠️ 并发警告 ｜ {warn_txt} / {config.concurrent_play_warn_threshold} 次')
+    rows.append(f'🔋 上次活动 ｜ {last}')
+    rows.append(f'🎬 观影时长 ｜ {w30} 分钟')
+    text = '\n'.join('· ' + r for r in rows)
+    if footer:
+        text += '\n\n' + footer
+    return text
+
+
+
+# ============================================================================
+# 会员自助中心（Telegram Mini App）
+# 页面由本机 FastAPI 提供：GET /app/  （见 bot/web/miniapp.py）
+# Telegram 要求 Mini App 必须是 https，域名走 cloudflared。
+# 换域名时改这里 + docker restart embyboss 即可，无需重建容器。
+# ============================================================================
+MINIAPP_URL = "https://emby.trig.cc.cd/app/"
+
+async def panel_mini(first=None, uid=None, lv='', ex='', us=0, name='', embyid=None, footer=None):
+    """私聊精简卡片（/start、主界面按钮）"""
+    perm = panel_perm(lv)
+    total_h, recent_h = await panel_watch(embyid)
+    lv_no, lv_name = panel_effective_level(uid, total_h)
+    title = panel_title(uid) if uid else ''
+    w30 = int(round((recent_h or 0) * 60))
+    rows = [
+        '\U0001F396\ufe0f 专属称号  |\u3000Lv%d \u00b7 %s' % (lv_no, title or lv_name),
+        '\U0001F194 用户のID  |\u3000%s' % (uid if uid else '-'),
+        '\U0001F4A0 当前身份  |\u3000%s' % panel_identity(perm),
+        '\U0001F365 积分奶茶  |\u3000%s' % (us if us is not None else 0),
+        '\U0001F6A8 到期时间  |\u3000%s' % panel_expire(ex, perm),
+        '\U0001F3AC 观影时长  |\u3000%d 分钟' % w30,
+    ]
+    text = '\u258e欢迎使用茶百道！%s' % (first or '')
+    text += '\n\n' + '\n'.join('\u00b7 ' + r for r in rows)
+    if footer:
+        text += '\n\n' + footer
+    return text
+
+
+
+def miniapp_button(text: str = '🌐 会员中心'):
+    """构造 Mini App 按钮；未配置地址时返回 None（面板自动跳过）。"""
+    if not MINIAPP_URL:
+        return None
+    return InlineKeyboardButton(text, web_app=WebAppInfo(url=MINIAPP_URL))
 
 """start面板 ↓"""
 
@@ -64,7 +297,12 @@ def members_ikb(is_admin: bool = False, account: bool = False) -> InlineKeyboard
         if moviepilot.status:
             normal.append([('🍿 点播中心', 'download_center')])
         normal.append([('♻️ 主界面', 'back_start')])
-        return ikb(normal)
+        markup = ikb(normal)
+        # 会员中心（Mini App）插在「主界面」上方
+        _web = miniapp_button()
+        if _web is not None:
+            markup.inline_keyboard.insert(len(markup.inline_keyboard) - 1, [_web])
+        return markup
     else:
         return judge_start_ikb(is_admin, account)
         # return ikb(
@@ -442,7 +680,9 @@ async def cr_kk_ikb(uid, first, warn_count=None):
     has_extralib = False
     data = await members_info(uid)
     if data is None:
-        text += f'**· 🆔 TG** ：[{first}](tg://user?id={uid}) [`{uid}`]\n数据库中没有此ID。ta 还没有私聊过我'
+        text += await panel_card(first=first, uid=uid, lv='d', ex='', us=0, name='',
+                                 embyid=None, warn_count='-',
+                                 footer='数据库中没有此ID，ta 还没有私聊过我')
     else:
         name, lv, ex, iv, embyid, pwd2 = data
         if name != '无账户信息':
@@ -485,35 +725,23 @@ async def cr_kk_ikb(uid, first, warn_count=None):
             has_extralib = len(keyboard) > 2
             try:
                 rst = await emby.emby_cust_commit(emby_id=embyid, days=30)
-                last_time = rst[0][0]
-                toltime = rst[0][1]
-                text1 = f"**· 🔋 上次活动** | {last_time.split('.')[0]}\n" \
-                        f"**· 📅 过去30天** | {toltime} 分钟"
-            except (TypeError, IndexError, ValueError):
-                text1 = f"**· 📅 过去30天未有记录**"
+                last_time = rst[0][0].split('.')[0]
+            except (TypeError, IndexError, ValueError, AttributeError):
+                last_time = '暂无记录'
         else:
             keyboard.append(['✨ 赠送资格', f'gift-{uid}'])
         # 并发播放警告计数：只对已注册 Emby 账户的用户展示并开放操作。
-        # warn_count 显式传入时直接用传入值 —— 刚改完计数重渲染面板时不能
-        # 再读一次数据库，否则万一读到旧值，面板文本与原来一模一样，
-        # Telegram 会以 MESSAGE_NOT_MODIFIED 拒绝编辑，表现就是「面板不刷新」。
-        warn_line = ''
+        # warn_count 显式传入时直接用传入值 —— 刚改完计数重渲染面板时不能再读一次数据库，
+        # 否则万一读到旧值，面板文本与原来一模一样，Telegram 会以 MESSAGE_NOT_MODIFIED
+        # 拒绝编辑，表现就是「面板不刷新」。
+        shown = '-'
         if name != '无账户信息':
             if warn_count is None:
                 warn_count = _warn_count_of(uid)
-            # 读不到时不能假装是 0（管理员会以为这个人没问题）。用自解释的文案
-            # 而不是 "?"：这一行普通用户在 /myinfo 里也会看到，一个孤零零的问号
-            # 他们既看不懂也无从处理。
+            # 读不到时不能假装是 0（管理员会以为这个人没问题）。
             shown = '读取失败' if warn_count is None else warn_count
-            warn_line = f"**· ⚠️ 并发警告** | **{shown}** / {config.concurrent_play_warn_threshold} 次\n"
-        text += f"**· 🍉 TG&名称** | [{first}](tg://user?id={uid})\n" \
-                f"**· 🍒 识别のID** | `{uid}`\n" \
-                f"**· 🍓 当前状态** | {lv}\n" \
-                f"**· 🍥 持有{sakura_b}** | {iv}\n" \
-                f"**· 💠 账号名称** | {name}\n" \
-                f"**· 🚨 到期时间** | **{ex}**\n" \
-                f"{warn_line}"
-        text += text1
+        text += await panel_card(first=first, uid=uid, lv=lv, ex=ex, us=iv, name=name,
+                                 embyid=embyid, warn_count=shown)
         # 警告按钮不参与上面的 array_chunk：否则「额外媒体库」按钮在不在（条目奇偶）
         # 会把它们拆散错位。排布规则：
         #   「🔄 重置警告」与「关闭/开启 额外媒体库」**同一行** —— 两者都是

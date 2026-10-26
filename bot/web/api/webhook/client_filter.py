@@ -87,6 +87,37 @@ async def is_client_blocked(client: str) -> bool:
     return match_client_patterns(client, blocked_clients)
 
 
+def save_block_record(user_id, user_name, session_id, client_name,
+                      tg_id, user_lv, terminate_accepted, block_success):
+    """把拦截记录落库，供 Chapanda 面板只读展示。
+
+    独立 try/except：写库失败绝不能让 webhook 报错，否则登录链路受影响。
+    """
+    try:
+        from bot.sql_helper import engine
+        from sqlalchemy import text
+        with engine.begin() as conn:
+            conn.execute(text(
+                "INSERT INTO client_block_records"
+                "(blocked_at,user_name,emby_id,tg_id,user_lv,client_name,"
+                "session_id,terminate_accepted,block_success,source) VALUES"
+                "(:blocked_at,:user_name,:emby_id,:tg_id,:user_lv,:client_name,"
+                ":session_id,:terminate_accepted,:block_success,'webhook')"),
+                {
+                    "blocked_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    "user_name": (user_name or "")[:255],
+                    "emby_id": (user_id or "")[:64],
+                    "tg_id": tg_id,
+                    "user_lv": (user_lv or "")[:8],
+                    "client_name": (client_name or "")[:255],
+                    "session_id": (session_id or "")[:64],
+                    "terminate_accepted": 1 if terminate_accepted else 0,
+                    "block_success": 1 if block_success else 0,
+                })
+    except Exception as e:
+        LOGGER.error(f"写入拦截记录失败: {str(e)}")
+
+
 async def log_blocked_request(
     user_id: str = None,
     user_name: str = None,
@@ -136,6 +167,8 @@ async def log_blocked_request(
         )
 
         LOGGER.warning(log_message)
+        save_block_record(user_id, user_name, session_id, client_name,
+                          tg_id, user_lv, terminate_accepted, block_success)
 
         # 如果配置了管理员群组，发送通知并转发给用户
         if hasattr(config, "group") and config.group:
@@ -180,6 +213,12 @@ async def terminate_blocked_session(session_id: str, client_name: str) -> bool:
 @router.post("/webhook/client-filter")
 async def handle_client_filter_webhook(request: Request):
     """处理Emby用户代理拦截webhook"""
+
+    # 校验 webhook token（防止伪造事件）
+    _expect = getattr(config, "bot_token", "") or ""
+    _got = request.query_params.get("token", "")
+    if _expect and _got != _expect:
+        raise HTTPException(status_code=403, detail="invalid webhook token")
 
     # 检查客户端过滤是否开启
     if not getattr(config, "client_filter_enabled", False):

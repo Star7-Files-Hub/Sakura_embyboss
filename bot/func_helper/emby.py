@@ -602,43 +602,32 @@ class Embyservice(metaclass=Singleton):
         """
         重置用户密码
         :param user_id: 用户ID
-        :param new_password: 新密码，为空则重置为无密码
+        :param new_password: 新密码，为空则自动生成随机密码（安全加固）
         :return: 是否成功
         """
         try:
             LOGGER.info(f"开始重置密码: {emby_id}")
-            
-            # 第一步：重置密码
-            pwd_data = pwd_policy(emby_id, stats=True, new=None)
+            # 【安全加固】禁止把密码重置为空：为空时自动生成 12 位随机强密码
+            if not new_password:
+                import secrets as _sec
+                new_password = "".join(_sec.choice("abcdefghjkmnpqrstuvwxyzABCDEFGHJKMNPQRSTUVWXYZ23456789") for _ in range(12))
+                LOGGER.warning(f"【安全加固】空密码重置请求已自动改为随机密码: {emby_id}")
+
+            # 单步直接覆盖设置新密码（默认超时 10 秒，与原始版一致）
+            pwd_data = pwd_policy(emby_id, new=new_password)
             result = await self._request('POST', f'/emby/Users/{emby_id}/Password', json=pwd_data)
             if not result.success:
-                LOGGER.error(f"重置密码失败: {emby_id} - {result.error}")
+                LOGGER.error(f"设置新密码失败: {emby_id} - {result.error}")
                 return False
-            
-            if new_password is None:
-                # 更新数据库记录为无密码
-                if sql_update_emby(Emby.embyid == emby_id, pwd=None):
-                    LOGGER.info(f"成功重置密码为空: {emby_id}")
-                    return True
-                else:
-                    LOGGER.error(f"更新数据库失败: {emby_id}")
-                    return False
+
+            # 更新数据库
+            if sql_update_emby(Emby.embyid == emby_id, pwd=new_password):
+                LOGGER.info(f"成功重置密码: {emby_id}")
+                return True
             else:
-                # 设置新密码
-                pwd_data2 = pwd_policy(emby_id, new=new_password)
-                result = await self._request('POST', f'/emby/Users/{emby_id}/Password', json=pwd_data2)
-                if not result.success:
-                    LOGGER.error(f"设置新密码失败: {emby_id} - {result.error}")
-                    return False
-                
-                # 更新数据库
-                if sql_update_emby(Emby.embyid == emby_id, pwd=new_password):
-                    LOGGER.info(f"成功重置密码: {emby_id}")
-                    return True
-                else:
-                    LOGGER.error(f"更新数据库失败: {emby_id}")
-                    return False
-                    
+                LOGGER.error(f"更新数据库失败: {emby_id}")
+                return False
+
         except Exception as e:
             LOGGER.error(f"重置密码异常: {emby_id} - {str(e)}")
             return False
@@ -1141,7 +1130,42 @@ class Embyservice(metaclass=Singleton):
                     })
 
                 result = await self._request('POST', f'/emby/Users/{emby_id}/Policy', json=policy)
-            if result.success:
+
+            effective = result.success
+            if not effective:
+                # 【超时重试】写策略的请求超时（实测 10 秒）在并发封禁高发时段很常见，
+                # 超时只说明**我们没等到响应**，不代表服务端没收到/没应用。原样重试一次，
+                # 代价只有一次请求，却能救回一批「策略没写进去」的情况。
+                LOGGER.warning(f"写用户策略失败，原样重试一次: {emby_id} - {result.error}")
+                retry = await self._request('POST', f'/emby/Users/{emby_id}/Policy', json=policy)
+                if retry.success:
+                    result = retry
+                    effective = True
+                else:
+                    LOGGER.warning(f"写用户策略重试仍失败: {emby_id} - {retry.error}")
+            if not effective:
+                # 【回读兜底】重试也失败时，回读一次真实状态：只要 IsDisabled 已经等于
+                # 本次要写入的值，就认为**已经生效**并按成功处理。
+                # 否则调用方（client_filter 等）会因为没有返回值而不写 lv='c'，
+                # 于是出现「Emby 已禁用、EmbyBoss 仍显示正常」的账号
+                # （实测 yyylw：22:16:18 请求超时 → block_success=0 → lv 一直停在 'b'）。
+                try:
+                    _rb = await self.get_user(emby_id)
+                except Exception as _e:
+                    _rb = None
+                    LOGGER.warning(f"回读用户策略异常: {emby_id} - {type(_e).__name__}: {_e}")
+                _act = None
+                if isinstance(_rb, dict):
+                    _p = _rb.get("Policy")
+                    if isinstance(_p, dict) and "IsDisabled" in _p:
+                        _act = bool(_p.get("IsDisabled"))
+                if _act is not None and _act == bool(disable):
+                    effective = True
+                    LOGGER.warning(
+                        f"写用户策略请求失败，但回读确认 IsDisabled={bool(disable)} 已生效，按成功处理: "
+                        f"{emby_id} - {result.error}"
+                    )
+            if effective:
                 # 【接管声明】任何一次显式的策略写入都意味着"这个用户的禁用状态
                 # 由本次调用负责"，所以必须作废可能还挂着的「临时封禁踢流」标记。
                 #

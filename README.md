@@ -24,6 +24,21 @@
 > **声明：本项目仅供学习交流使用，仅作为辅助工具借助tg平台方便用户管理自己的媒体库成员，对用户的其他行为及内容毫不知情**
 <br>
 
+> **本 fork 说明（2026-10-27 同步）**
+>
+> 在 `berry8838/Sakura_embyboss` 基础上叠加了线上跑的一批改造，源码与运行中的容器一致：
+>
+> - **会员中心（Mini App）**：`bot/web/miniapp.py` + `miniapp.html/js/css`，含观影榜 / 奶茶榜 / 热播榜（Emby Playback Reporting 统计，支持今日/昨日/近 7 天）、在线人数（近 10 分钟活跃口径）、设备管理、背包与商城、邀请码（标准注册码格式）。
+> - **并发限制**：`bot/modules/extra/concurrent_play_monitor.py` + `docs_extra/Concurrent_Play_Limit.md`（按警告次数分级通知）。
+> - **注册节流与排队**：`bot/func_helper/register_throttle.py`、`register_queue`，避免批量建号把 Emby 打假死。
+> - **分区权限 / 邀请码 / 签到 / 红包 / 保号 / 求片**：`bot/modules/panel/*`、`bot/scheduler/*`。
+> - **服务器面板**：密码一键复制、线路公告、单集/整季清理等。
+>
+> ⚠️ **已脱敏**：示例配置、`docker-compose.yml` 里的口令都是占位符；`miniapp.js` 里的线路域名替换为
+> `emby.example.com` / `emby2.example.com` / `white.example.com` / `white2.example.com`，
+> Telegram 机器人链接替换为 `t.me/your_bot`。部署前请全部改成自己的。
+> `config.json`、`*.session`、`keys/`、`log/`、`db_backup/` 不入库。
+
 ## 💐 Our Contributors
 
 <a href="https://github.com/berry8838/Sakura_embyboss/graphs/contributors">

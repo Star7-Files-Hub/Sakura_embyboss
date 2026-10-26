@@ -7,6 +7,74 @@ from sqlalchemy import func
 from sqlalchemy import or_
 from bot import LOGGER
 
+# ============================================================
+# 敏感字段透明加密（2026-10-24 加）
+# pwd（登录密码）/ pwd2（安全码）原先是明文存库。改成 AES-GCM：
+# 库里落库为 "enc1:<base64(nonce+密文)>"，业务代码读到的仍是明文，
+# 所以面板展示、复制密码、改密流程全部零改动。
+# 密钥放在宿主机 600 文件，只读挂载进容器：
+#   /root/docker/sakura-embyboss/keys/embydb.key -> /app/keys/embydb.key
+# 密钥丢失 = 所有密码无法还原，务必备份。
+# ============================================================
+import base64 as _b64
+import os as _os
+
+from sqlalchemy.types import TypeDecorator
+
+try:
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM as _AESGCM
+except Exception:  # 容器缺库时退化为「拒绝写入」，绝不落明文
+    _AESGCM = None
+
+_KEY_FILE = _os.getenv("EMBY_DB_KEYFILE", "/app/keys/embydb.key")
+_ENC_PREFIX = "enc1:"
+_key_cache = None
+
+
+def _load_key():
+    global _key_cache
+    if _key_cache is None:
+        with open(_KEY_FILE, "rb") as f:
+            _key_cache = _b64.b64decode(f.read().strip())
+    return _key_cache
+
+
+class EncryptedString(TypeDecorator):
+    """AES-GCM 透明加解密字段。"""
+
+    impl = String(255)
+    cache_ok = True
+
+    def process_bind_param(self, value, dialect):
+        if value is None:
+            return None
+        s = value if isinstance(value, str) else str(value)
+        if not s:
+            return s
+        if s.startswith(_ENC_PREFIX):
+            return s  # 已经是密文，避免二次加密
+        if _AESGCM is None:
+            raise RuntimeError("cryptography 不可用，拒绝以明文写入 pwd")
+        nonce = _os.urandom(12)
+        ct = _AESGCM(_load_key()).encrypt(nonce, s.encode("utf-8"), None)
+        return _ENC_PREFIX + _b64.urlsafe_b64encode(nonce + ct).decode("ascii")
+
+    def process_result_value(self, value, dialect):
+        if value is None:
+            return None
+        s = value if isinstance(value, str) else str(value)
+        if not s.startswith(_ENC_PREFIX):
+            return s  # 迁移前的旧明文，原样返回
+        if _AESGCM is None:
+            LOGGER.error("pwd 解密失败：cryptography 不可用")
+            return ""
+        try:
+            raw = _b64.urlsafe_b64decode(s[len(_ENC_PREFIX):].encode("ascii"))
+            return _AESGCM(_load_key()).decrypt(raw[:12], raw[12:], None).decode("utf-8")
+        except Exception as e:
+            LOGGER.error(f"pwd 解密失败（密钥不匹配或数据损坏）: {e}")
+            return ""
+
 
 
 class Emby(Base):
@@ -17,8 +85,8 @@ class Emby(Base):
     tg = Column(BigInteger, primary_key=True, autoincrement=False)
     embyid = Column(String(255), nullable=True)
     name = Column(String(255), nullable=True)
-    pwd = Column(String(255), nullable=True)
-    pwd2 = Column(String(255), nullable=True)
+    pwd = Column(EncryptedString(), nullable=True)
+    pwd2 = Column(EncryptedString(), nullable=True)
     lv = Column(String(1), default='d')
     cr = Column(DateTime, nullable=True)
     ex = Column(DateTime, nullable=True)

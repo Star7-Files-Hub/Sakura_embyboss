@@ -5,7 +5,7 @@ register_throttle —— Emby 客户端侧「安全批量建号」统一限流�
 
 背景
 ────
-线上 3 号机（embyboss 容器）在同一时间段批量建号时，Emby（https://emby.teawaya.com，
+线上 3 号机（embyboss 容器）在同一时间段批量建号时，Emby（https://emby2.example.com，
 官方 4.10.0.40，ServerName=ChaPanda）会整体假死：HTTP 全部超时，只能重启容器恢复。
 
 客户端侧的三个放大器（详见 artifacts/bot-side-patch.md 的证据章节）：

@@ -13,3 +13,7 @@ from .ranks_task import week_ranks, day_ranks
 from .sync_favorites import sync_favorites
 from .sync_mp_download import sync_download_tasks
 from .partition_access import check_partition_access
+
+from .watch_count import notify_watch_count
+
+from .open_register import open_register, close_register

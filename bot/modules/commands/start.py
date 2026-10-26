@@ -13,9 +13,10 @@ from bot.modules.commands.exchange import rgs_code
 from bot.sql_helper.sql_emby import sql_add_emby, sql_get_emby
 from bot.func_helper.filters import user_in_group_filter, user_in_group_on_filter
 from bot.func_helper.msg_utils import deleteMessage, sendMessage, sendPhoto, callAnswer, editMessage
-from bot.func_helper.fix_bottons import group_f, judge_start_ikb, judge_group_ikb, cr_kk_ikb
+from bot.func_helper.fix_bottons import group_f, judge_start_ikb, judge_group_ikb, cr_kk_ikb, \
+    panel_perm, panel_expire, _warn_count_of, panel_card, panel_mini
 from bot.modules.extra import user_cha_ip
-from bot import bot, prefixes, group, bot_photo, ranks, sakura_b
+from bot import bot, prefixes, group, bot_photo, ranks, sakura_b, config
 
 
 # 反命令提示
@@ -75,20 +76,20 @@ async def p_start(_, msg):
         is_admin = judge_admins(msg.from_user.id)
         name, lv, ex, us, embyid, pwd2 = data
         stat, all_user, tem, timing = await open_check()
-        text = f"▎__欢迎进入用户面板！{msg.from_user.first_name}__\n\n" \
-               f"**· 🆔 用户のID** | `{msg.from_user.id}`\n" \
-               f"**· 📊 当前状态** | {lv}\n" \
-               f"**· 🍒 积分{sakura_b}** | {us}\n" \
-               f"**· ®️ 注册状态** | {stat}\n" \
-               f"**· 🎫 总注册限制** | {all_user}\n" \
-               f"**· 🎟️ 可注册席位** | {all_user - tem}\n"
+        _foot = '🧭 请选择你要使用的功能：'
+        if not embyid:
+            _foot = (f'®️ 注册状态：{stat}\n'
+                     f'🎫 总注册限制：{all_user}\n'
+                     f'🎟️ 可注册席位：{all_user - tem}\n\n') + _foot
+        text = await panel_mini(first=msg.from_user.first_name, uid=msg.from_user.id,
+                                lv=lv, ex=ex, us=us, name=name, embyid=embyid,
+                                footer=_foot)
         if not embyid:
             await asyncio.gather(deleteMessage(msg),
                                  sendPhoto(msg, bot_photo, caption=text, buttons=judge_start_ikb(is_admin, False)))
         else:
             await asyncio.gather(deleteMessage(msg),
-                                 sendPhoto(msg, bot_photo,
-                                           f"**✨ 只有你想见我的时候我们的相遇才有意义**\n\n🍉__你好鸭 [{msg.from_user.first_name}](tg://user?id={msg.from_user.id}) 请选择功能__👇",
+                                 sendPhoto(msg, bot_photo, text,
                                            buttons=judge_start_ikb(is_admin, True)))
 
 
@@ -97,9 +98,13 @@ async def p_start(_, msg):
 async def b_start(_, call):
     if await user_in_group_filter(_, call):
         is_admin = judge_admins(call.from_user.id)
+        _d = await members_info(tg=call.from_user.id)
+        _n, _l, _e, _u, _eid, _p = _d
+        _t = await panel_mini(first=call.from_user.first_name, uid=call.from_user.id,
+                              lv=_l, ex=_e, us=_u, name=_n, embyid=_eid,
+                              footer='🧭 请选择你要使用的功能：')
         await asyncio.gather(callAnswer(call, "⭐ 返回start"),
-                             editMessage(call,
-                                         text=f"**✨ 只有你想见我的时候我们的相遇才有意义**\n\n🍉__你好鸭 [{call.from_user.first_name}](tg://user?id={call.from_user.id}) 请选择功能__👇",
+                             editMessage(call, text=_t,
                                          buttons=judge_start_ikb(is_admin, account=True)))
     elif not await user_in_group_filter(_, call):
         await asyncio.gather(callAnswer(call, "⭐ 返回start"),

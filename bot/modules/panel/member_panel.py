@@ -21,7 +21,7 @@ from bot.func_helper.filters import user_in_group_on_filter
 from bot.func_helper.utils import members_info, cr_link_one, judge_admins, tem_deluser, pwd_create
 from bot.func_helper.fix_bottons import members_ikb, back_members_ikb, del_me_ikb, re_delme_ikb, \
     re_reset_ikb, re_changetg_ikb, emby_block_ikb, user_emby_block_ikb, user_emby_unblock_ikb, re_exchange_b_ikb, \
-    store_ikb, re_bindtg_ikb, close_it_ikb, store_query_page, re_born_ikb, send_changetg_ikb, favorites_page_ikb
+    store_ikb, re_bindtg_ikb, close_it_ikb, store_query_page, re_born_ikb, send_changetg_ikb, favorites_page_ikb, panel_watch, panel_level, panel_title, panel_perm, panel_expire, _warn_count_of, panel_card, panel_mini
 from bot.func_helper.msg_utils import callAnswer, editMessage, callListen, sendMessage, ask_return, deleteMessage
 from bot.modules.commands import p_start
 from bot.modules.commands.partition_code import _redeem_partition_code
@@ -114,12 +114,9 @@ async def members(_, call):
         return await callAnswer(call, '⚠️ 数据库没有你，请重新 /start录入', True)
     await callAnswer(call, f"✅ 用户界面")
     name, lv, ex, us, embyid, pwd2 = data
-    text = f"▎__欢迎进入用户面板！{call.from_user.first_name}__\n\n" \
-           f"**· 🆔 用户のID** | `{call.from_user.id}`\n" \
-           f"**· 📊 当前状态** | {lv}\n" \
-           f"**· 🍒 积分{sakura_b}** | {us}\n" \
-           f"**· 💠 账号名称** | [{name}](tg://user?id={call.from_user.id})\n" \
-           f"**· 🚨 到期时间** | {ex}"
+    text = await panel_mini(first=call.from_user.first_name, uid=call.from_user.id,
+                            lv=lv, ex=ex, us=us, name=name, embyid=embyid,
+                            footer='🧭 请选择你要使用的功能：')
     if not embyid:
         is_admin = judge_admins(call.from_user.id)
         await editMessage(call, text, members_ikb(is_admin, False))
@@ -474,7 +471,7 @@ async def reset(_, call):
             else:
                 await m.delete()
                 await editMessage(call, '🎯 请在 120s内 输入你要更新的密码,不限制中英文，emoji。特殊字符部分支持，其他概不负责。\n\n'
-                                        '点击 /cancel 将重置为空密码并退出。 无更改退出状态请等待120s')
+                                        '点击 /cancel 将重置为随机密码并退出。 无更改退出状态请等待120s')
                 mima = await callListen(call, 120, buttons=back_members_ikb)
                 if mima is False:
                     return
@@ -482,9 +479,12 @@ async def reset(_, call):
                 elif mima.text == '/cancel':
                     await mima.delete()
                     await editMessage(call, '**🎯 收到，正在重置ing。。。**')
-                    if await emby.emby_reset(emby_id=e.embyid) is True:
-                        await editMessage(call, '🕶️ 操作完成！已为您重置密码为 空。', buttons=back_members_ikb)
-                        LOGGER.info(f"【重置密码】：{call.from_user.id} 成功重置了空密码！")
+                    # 【安全加固】不再重置为空密码，改为随机强密码并告知用户
+                    import secrets as _sec
+                    _np = "".join(_sec.choice("abcdefghjkmnpqrstuvwxyzABCDEFGHJKMNPQRSTUVWXYZ23456789") for _ in range(12))
+                    if await emby.emby_reset(emby_id=e.embyid, new_password=_np) is True:
+                        await editMessage(call, f'🕶️ 操作完成！已为您重置密码为 `{_np}`。', buttons=back_members_ikb)
+                        LOGGER.info(f"【重置密码】：{call.from_user.id} 成功重置了随机密码！")
                     else:
                         await editMessage(call, '🫥 重置密码操作失败！请联系管理员。')
                         LOGGER.error(f"【重置密码】：{call.from_user.id} 重置密码失败 ！")
@@ -492,6 +492,32 @@ async def reset(_, call):
                 else:
                     await mima.delete()
                     await editMessage(call, '**🎯 收到，正在重置ing。。。**')
+                    # 【安全加固·弱密码拦截】拒绝过短/纯数字/用户名/重复字符/常见弱密码
+                    _p = (mima.text or "").strip()
+                    _bad = None
+                    if len(_p) < 8:
+                        _bad = "长度不足 8 位"
+                    elif _p.isdigit():
+                        _bad = "不能是纯数字"
+                    elif _p.lower() == (e.name or "").strip().lower():
+                        _bad = "不能与用户名相同"
+                    elif len(set(_p)) == 1:
+                        _bad = "不能是重复字符"
+                    elif _p.lower() in {"123456", "1234567", "12345678", "123456789", "111111", "000000",
+                                        "888888", "8888888", "88888888", "666666", "6666666", "66666666",
+                                        "password", "qwerty", "qwertyuiop", "abc123", "abc123456", "a123456",
+                                        "123123", "112233", "121212", "789456", "159357", "147258", "124578",
+                                        "205020", "5201314", "1314520", "woaini", "iloveyou", "asdfghjkl",
+                                        "admin", "root", "1qaz2wsx", "qwe123", "qwe123456", "aa123456",
+                                        "520520", "tjj1114", "damieai110", "luckyoto", "witness321"}:
+                        _bad = "属于常见弱密码"
+                    if _bad:
+                        await editMessage(call, f'**💢 密码不符合安全要求：{_bad}**\n\n'
+                                                '要求：至少 8 位，不能是纯数字、用户名或常见弱密码。\n'
+                                                '请重新点击「修改密码」重新设置。',
+                                          buttons=back_members_ikb)
+                        LOGGER.info(f"【重置密码】拒绝弱密码：{call.from_user.id} → {_bad}")
+                        return
                     if await emby.emby_reset(emby_id=e.embyid, new_password=mima.text) is True:
                         await editMessage(call, f'🕶️ 操作完成！已为您重置密码为 `{mima.text}`。',
                                           buttons=back_members_ikb)
@@ -902,3 +928,110 @@ async def my_devices(_, call):
             if not chunk_text.strip():
                 continue
             await sendMessage(call.message, chunk_text, buttons=close_it_ikb)
+
+
+# ============================================================================
+# 「修改安全码」一次性机会（2026-10-26 新增）
+# 用户自助修改 pwd2；每个账号仅允许成功修改 1 次，用后永久锁定。
+# 使用记录存于 emby_pwd2_once 表（tg 主键 + used_at），不保存安全码本身。
+# ============================================================================
+_PWD2_ONCE_DDL = (
+    "CREATE TABLE IF NOT EXISTS emby_pwd2_once ("
+    "tg BIGINT PRIMARY KEY, "
+    "used_at DATETIME NOT NULL"
+    ") DEFAULT CHARSET=utf8mb4"
+)
+_pwd2_once_ready = False
+
+
+def _pwd2_once_conn():
+    global _pwd2_once_ready
+    from bot.sql_helper import engine
+    from sqlalchemy import text
+    conn = engine.connect()
+    if not _pwd2_once_ready:
+        conn.execute(text(_PWD2_ONCE_DDL))
+        conn.commit()
+        _pwd2_once_ready = True
+    return conn
+
+
+def pwd2_once_used(tg) -> bool:
+    from sqlalchemy import text
+    conn = _pwd2_once_conn()
+    try:
+        row = conn.execute(
+            text("SELECT 1 FROM emby_pwd2_once WHERE tg = :tg LIMIT 1"),
+            {"tg": int(tg)},
+        ).fetchone()
+        return row is not None
+    finally:
+        conn.close()
+
+
+def mark_pwd2_once_used(tg) -> None:
+    from sqlalchemy import text
+    conn = _pwd2_once_conn()
+    try:
+        conn.execute(
+            text("INSERT IGNORE INTO emby_pwd2_once (tg, used_at) VALUES (:tg, NOW())"),
+            {"tg": int(tg)},
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+@bot.on_callback_query(filters.regex(r'^chgpwd2$'))
+async def change_pwd2_once(_, call):
+    e = sql_get_emby(tg=call.from_user.id)
+    if e is None:
+        return await callAnswer(call, '⚠️ 数据库没有你，请重新 /start录入', True)
+    if e.embyid is None:
+        return await bot.answer_callback_query(call.id, '未查询到账户，不许乱点！💢', show_alert=True)
+    if pwd2_once_used(call.from_user.id):
+        return await bot.answer_callback_query(
+            call.id, '🔒 修改安全码的机会只有一次，您已经用过了。如确有需要请联系管理员。', show_alert=True)
+
+    await callAnswer(call, '🔑 修改安全码前，先验证一下当前的吧~')
+    send = await editMessage(call, '**🔰 安全码验证**：\n\n'
+                                   '👮🏻 为确认是本人操作，请对我发送**当前安全码**（120s 内有效）\n\n'
+                                   '🛑 **停止请点 /cancel**', buttons=back_members_ikb)
+    if send is False:
+        return
+    m = await callListen(call, 120, buttons=back_members_ikb)
+    if m is False:
+        return
+    if m.text == '/cancel':
+        await m.delete()
+        return await editMessage(call, '__您已经取消输入__ **安全码修改已结束！**', buttons=back_members_ikb)
+    if m.text != (e.pwd2 or ''):
+        await m.delete()
+        return await editMessage(call, f'**💢 验证不通过，`{m.text}` 不是当前安全码。**', buttons=back_members_ikb)
+    await m.delete()
+
+    await editMessage(call, '**🎯 请发送新的安全码**（非空、不含空格、不超过 32 个字符，120s 内有效）\n\n'
+                            '⚠️ 提示：本功能**每个账号仅可使用一次**，修改成功后不可再自助修改。\n'
+                            '🛑 **停止请点 /cancel**', buttons=back_members_ikb)
+    m2 = await callListen(call, 120, buttons=back_members_ikb)
+    if m2 is False:
+        return
+    if m2.text == '/cancel':
+        await m2.delete()
+        return await editMessage(call, '__您已经取消输入__ **安全码未修改，机会仍保留。**', buttons=back_members_ikb)
+
+    new_pwd2 = (m2.text or '').strip()
+    await m2.delete()
+    if not new_pwd2 or any(ch.isspace() for ch in new_pwd2) or len(new_pwd2) > 32:
+        return await editMessage(call, '❌ 格式不支持（不能为空、不能含空格、最多 32 字符），'
+                                       '本次未修改，机会仍保留。', buttons=back_members_ikb)
+    if new_pwd2 == (e.pwd2 or ''):
+        return await editMessage(call, '⚠️ 新安全码与当前相同，未做修改，机会仍保留。', buttons=back_members_ikb)
+    if not sql_update_emby(Emby.tg == call.from_user.id, pwd2=new_pwd2):
+        return await editMessage(call, '❌ 写入失败，请稍后再试（机会仍保留）。', buttons=back_members_ikb)
+
+    mark_pwd2_once_used(call.from_user.id)
+    await editMessage(call, '✅ **安全码已更新完成**\n\n'
+                            f'· 新安全码：`{new_pwd2}`（请自行妥善保存）\n\n'
+                            '⚠️ 该功能每账号**仅限一次**，您已用完，之后无法再自助修改。\n'
+                            '如仍需重置请联系管理员。', buttons=back_members_ikb)
