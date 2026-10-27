@@ -124,7 +124,8 @@ if($("uName")){
     var _wh=[1,4,10,25,50,100,200], _wt=D.watchTotal||0, _wl=1;
     for(var _wi=0;_wi<_wh.length;_wi++){ if(_wt>=_wh[_wi]) _wl=_wi+1; else break; }
     var _ov=Number(D.lvOverride||0); if(_ov>=1&&_ov<=7) _wl=_ov;
-    $("uWatch").textContent="LV"+_wl;
+    var _wnm=(["初尝茶香","品茗入境","匠心调茶","茶韵名家","茶道宗师","百道传奇","巅峰至尊"][_wl-1]||"");
+    $("uWatch").innerHTML='<b>Lv'+_wl+'</b>'+(_wnm?'<em>· '+_wnm+'</em>':'');
     $("uWatch").setAttribute("data-lv",_wl);
     if($("uMedal")){
       $("uMedal").innerHTML=medalImg(_wl);
@@ -227,7 +228,7 @@ function fmtDur(m){
   return h ? (h+"小时"+(r?r+"分":"")) : (m+"分钟");
 }
 function lvNameOf(n){for(var i=0;i<MEDALS.length;i++){if(MEDALS[i].i==n)return MEDALS[i].name;}return "";}
-function lvTag(lv){var nm=lvNameOf(lv);return '<i class="lvtag lv'+(lv>=7?"8":lv>=4?"3":"1")+'" title="Lv'+lv+(nm?' · '+nm:'')+'">Lv'+lv+'</i>';}
+function lvTag(lv){var nm=lvNameOf(lv);return '<i class="lvtag lv'+(lv>=7?"8":lv>=4?"3":"1")+'" title="Lv'+lv+(nm?' · '+nm:'')+'"><b>Lv'+lv+'</b>'+(nm?'<em>· '+nm+'</em>':'')+'</i>';}
 function initials(n){
   var t=String(n).replace(/[^\u4e00-\u9fa5A-Za-z0-9]/g,"");
   return (t.slice(0,1)||"?").toUpperCase();

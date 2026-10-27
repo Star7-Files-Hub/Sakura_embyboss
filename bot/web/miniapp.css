@@ -1091,8 +1091,11 @@ body::after{content:"";position:fixed;inset:0;pointer-events:none;z-index:0;
 .pval{position:relative;z-index:1;margin-top:6px;font-size:11px;font-weight:800;color:#0a5aa8}
 .pval i,.rkval i{font-style:normal;font-size:9px;font-weight:700;opacity:.6;margin-left:1px}
 
-.lvtag{display:inline-block;font-size:9px;font-weight:800;line-height:1;padding:3px 6px;
-  border-radius:6px;letter-spacing:.2px;font-style:normal}
+.lvtag{display:inline-flex;align-items:center;gap:2px;white-space:nowrap;
+  font-size:8.5px;font-weight:700;line-height:1;padding:3px 5px;
+  border-radius:6px;letter-spacing:.1px;font-style:normal}
+.lvtag b{font-weight:900;letter-spacing:.2px}
+.lvtag em{font-style:normal;font-weight:600;opacity:.92}
 .lvtag.lv1{color:#2c7a52;background:rgba(86,196,140,.16);box-shadow:inset 0 0 0 1px rgba(86,196,140,.32)}
 .lvtag.lv3{color:#a3741b;background:rgba(226,161,44,.18);box-shadow:inset 0 0 0 1px rgba(226,161,44,.34)}
 .lvtag.lv8{color:#0c6fb8;background:rgba(48,168,240,.18);box-shadow:inset 0 0 0 1px rgba(48,168,240,.34)}
@@ -1101,7 +1104,7 @@ body::after{content:"";position:fixed;inset:0;pointer-events:none;z-index:0;
   padding:2px 2px 9px;border-bottom:1px solid rgba(12,68,124,.08)}
 .rlistHd b{font-size:13px;font-weight:800;color:#12354f}
 .rlistHd span{font-size:10px;color:#7b98b4;font-weight:600;letter-spacing:.3px}
-.rkr{display:flex;align-items:center;gap:9px;padding:10px 2px;border-bottom:1px solid rgba(12,68,124,.06)}
+.rkr{display:flex;align-items:center;gap:7px;padding:10px 2px;border-bottom:1px solid rgba(12,68,124,.06)}
 .rkr:last-child{border-bottom:0}
 .rkno{flex:0 0 20px;text-align:center;font-size:12px;font-weight:800;font-style:italic;color:#8aa3ba}
 .rkava{flex:0 0 30px;width:30px;height:30px;border-radius:11px;display:grid;place-items:center;
@@ -2136,10 +2139,13 @@ html.booting .skr{animation:none;background:rgba(12,68,124,.08)}
 .rdHint{padding:8px 2px 2px;font-size:10.5px;line-height:1.5;color:#8aa4bb}
 
 /* ===== 等级下方观影勋章 ===== */
-.wlvWrap{position:absolute;top:13px;right:13px;z-index:3;
-  display:flex;flex-direction:column;align-items:center;gap:6px}
-.wlvWrap .wlvPill{position:static;top:auto;right:auto}
-.wmedal{width:31px;height:31px;display:flex;align-items:center;justify-content:center;
+.wlvWrap{position:absolute;top:14px;right:13px;z-index:3;
+  display:flex;flex-direction:row;align-items:center;justify-content:center;gap:6px}
+.wlvWrap .wlvPill{position:static;top:auto;right:auto;
+  display:inline-flex;align-items:center;gap:4px;height:23px;min-width:0;padding:0 9px 0 7px}
+.wlvPill b{font-weight:900;letter-spacing:.5px}
+.wlvPill em{font-style:normal;font-weight:700;opacity:.9;letter-spacing:0}
+.wmedal{order:-1;width:23px;height:23px;flex:0 0 23px;display:flex;align-items:center;justify-content:center;
   pointer-events:none;filter:drop-shadow(0 3px 6px rgba(11,42,73,.22));
   opacity:0;transition:opacity .18s ease}
 .wmedal[data-lv]{opacity:1}
