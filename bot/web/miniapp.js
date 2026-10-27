@@ -597,8 +597,8 @@ function renderCal(){
   for(var i=0;i<first;i++) out+='<i class="void"></i>';
   for(var d=1;d<=total;d++){
     var key=y+"-"+pad2(m+1)+"-"+pad2(d);
-    var pts=SIGN.days[key];
-    if(pts||(key===SIGN.today&&SIGN.signed)){cnt++;out+='<i class="done'+(d===td?" today":"")+'">'+d+'</i>';}
+    var has=Object.prototype.hasOwnProperty.call(SIGN.days,key);
+    if(has||(key===SIGN.today&&SIGN.signed)){cnt++;out+='<i class="done'+(d===td?" today":"")+'">'+d+'</i>';}
     else out+='<i class="'+(d===td?"today":"")+'">'+d+'</i>';
   }
   box.innerHTML=out;

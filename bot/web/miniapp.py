@@ -803,9 +803,13 @@ def _ck_reward():
 def _ck_state(e):
     today = _ck_dt.now(_CK_TZ).strftime("%Y-%m-%d")
     days = _ck_days(getattr(e, "tg", 0))
-    signed = bool(getattr(e, "ch", None)) and e.ch.strftime("%Y-%m-%d") >= today
-    if signed and today not in days:
-        days[today] = 0
+    ch = getattr(e, "ch", None)
+    chd = ch.strftime("%Y-%m-%d") if ch else ""
+    signed = bool(chd) and chd >= today
+    # 最近一次签到日若在明细表里缺行（老数据、写库失败），补进去：
+    # 否则日历漏标、连续天数被截断成 1
+    if chd and chd not in days:
+        days[chd] = 0
     return {
         "signed": signed,
         "today": today,
