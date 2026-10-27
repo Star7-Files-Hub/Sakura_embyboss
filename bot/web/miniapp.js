@@ -226,7 +226,8 @@ function fmtDur(m){
   var h=Math.floor(m/60), r=m%60;
   return h ? (h+"小时"+(r?r+"分":"")) : (m+"分钟");
 }
-function lvTag(lv){return '<i class="lvtag lv'+(lv>=7?"8":lv>=4?"3":"1")+'">LV'+lv+'</i>';}
+function lvNameOf(n){for(var i=0;i<MEDALS.length;i++){if(MEDALS[i].i==n)return MEDALS[i].name;}return "";}
+function lvTag(lv){var nm=lvNameOf(lv);return '<i class="lvtag lv'+(lv>=7?"8":lv>=4?"3":"1")+'" title="Lv'+lv+(nm?' · '+nm:'')+'">Lv'+lv+'</i>';}
 function initials(n){
   var t=String(n).replace(/[^\u4e00-\u9fa5A-Za-z0-9]/g,"");
   return (t.slice(0,1)||"?").toUpperCase();
@@ -1209,21 +1210,15 @@ setTimeout(fitTop,60);setTimeout(fitTop,300);
     var hero=$("mdHero");
     if(hero){
       hero.innerHTML=
-        '<div class="mdHeroTop">'+
-          '<div class="mdLv">'+
-            '<div class="mdLvBig">Lv'+(lv||"0")+'</div>'+
-
-          '</div>'+
-        '</div>'+
         '<div class="mdHeroMid">'+ (MC.medalImg?MC.medalImg(lv||1,"mdBig"):'') +
           '<div class="mdHtx">'+
-            '<div class="mdName">'+esc(cur.name)+'</div>'+
+            '<div class="mdName">Lv'+(lv||0)+' · '+esc(cur.name)+'</div>'+
             '<div class="mdSub">累计观看 '+h1(tot)+' 小时'+
               (next?' · 距 <b>'+esc(next.name)+'</b> 还差 <b>'+h1(next.h-tot)+'</b> 小时':' · 已达最高等级')+'</div>'+
           '</div>'+
         '</div>'+
         '<div class="mdBar"><i style="width:'+pct+'%"></i></div>'+
-        '<div class="mdPct"><span>当前 Lv'+(lv||0)+' · 上限 Lv'+MEDALS.length+'</span><span>'+pct+'%</span></div>';
+        '<div class="mdPct"><span>当前 Lv'+(lv||0)+' · '+esc(cur.name)+'</span><span>共 '+MEDALS.length+' 级 · '+pct+'%</span></div>';
     }
     var rows=[];
     for(var j=0;j<MEDALS.length;j++){
@@ -1237,7 +1232,7 @@ setTimeout(fitTop,60);setTimeout(fitTop,300);
       rows.push('<div class="lvrow '+(done?"done":(isNext?"now":"lock"))+'">'+
         (MC.medalImg?MC.medalImg(m.i):"")+
         '<div class="lvMid">'+
-          '<div class="lvNm">'+esc(m.name)+'</div>'+
+          '<div class="lvNm">Lv'+m.i+' · '+esc(m.name)+'</div>'+
           '<div class="lvMeta">'+(done?'已解锁 · ':(isNext?'还差 '+h1(m.h-tot)+' 小时 · ':'解锁需 '))+m.h+' 小时</div>'+
           '<div class="lvProg"><i style="width:'+p+'%"></i></div>'+
         '</div>'+
