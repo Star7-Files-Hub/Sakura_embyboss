@@ -57,6 +57,7 @@ admin_ok:false};
   D.watch30=(P.watch30==null?null:P.watch30);
   D.watchTotal=(P.watch_total==null?null:P.watch_total);
   D.lvOverride=(P.lv_override==null?0:P.lv_override);
+  D.ctitle=String(me.ctitle||"").trim();
   var pl=(P.playing||[])[0];
   D.playing=pl?{t:pl.title,s:[pl.type,pl.device,pl.client].filter(Boolean).join(" · "),p:pl.percent||0}:null;
   D.recent=(P.recent||[]).map(function(r){return {t:r.title,p:null,sub:r.played||r.sub||""};});
@@ -125,7 +126,9 @@ if($("uName")){
     for(var _wi=0;_wi<_wh.length;_wi++){ if(_wt>=_wh[_wi]) _wl=_wi+1; else break; }
     var _ov=Number(D.lvOverride||0); if(_ov>=1&&_ov<=7) _wl=_ov;
     var _wnm=(["初尝茶香","品茗入境","匠心调茶","茶韵名家","茶道宗师","百道传奇","巅峰至尊"][_wl-1]||"");
-    $("uWatch").innerHTML='<b>Lv'+_wl+'</b>'+(_wnm?'<em>· '+_wnm+'</em>':'');
+    var _wct=String(D.ctitle||"").trim();
+    var _wshow=_wct||_wnm;
+    $("uWatch").innerHTML='<b>Lv'+_wl+'</b>'+(_wshow?'<em>· '+_wshow+'</em>':'');
     $("uWatch").setAttribute("data-lv",_wl);
     if($("uMedal")){
       $("uMedal").innerHTML=medalImg(_wl);
@@ -228,7 +231,8 @@ function fmtDur(m){
   return h ? (h+"小时"+(r?r+"分":"")) : (m+"分钟");
 }
 function lvNameOf(n){for(var i=0;i<MEDALS.length;i++){if(MEDALS[i].i==n)return MEDALS[i].name;}return "";}
-function lvTag(lv){var nm=lvNameOf(lv);return '<i class="lvtag lv'+(lv>=7?"8":lv>=4?"3":"1")+'" title="Lv'+lv+(nm?' · '+nm:'')+'"><b>Lv'+lv+'</b>'+(nm?'<em>· '+nm+'</em>':'')+'</i>';}
+function lvTag(lv,t){var auto=lvNameOf(lv),nm=String(t||"").trim()||auto;
+  return '<i class="lvtag lv'+(lv>=7?"8":lv>=4?"3":"1")+'" title="Lv'+lv+(auto?' · '+auto:'')+(String(t||"").trim()?'（自定义）':'')+'"><b>Lv'+lv+'</b>'+(nm?'<em>· '+nm+'</em>':'')+'</i>';}
 function initials(n){
   var t=String(n).replace(/[^\u4e00-\u9fa5A-Za-z0-9]/g,"");
   return (t.slice(0,1)||"?").toUpperCase();
@@ -302,7 +306,7 @@ function renderPodium(){
       '<div class="pcrown medal">'+medal(rank)+'</div>'+
       '<div class="pav">'+(o.av?'<img src="'+o.av+'" alt="" loading="lazy" decoding="async" onerror="this.remove()">':'')+initials(o.n)+'</div>'+
       '<div class="pnm">'+o.n+'</div>'+
-      '<div class="plv">'+lvTag(o.lv)+'</div>'+
+      '<div class="plv">'+lvTag(o.lv,o.t)+'</div>'+
       '<div class="pval">'+val+'</div>'+
       '</div>';
   }).join("");
@@ -317,7 +321,7 @@ function renderList(){
     var val=board==="watch"?fmtDur(o.v):'<b>'+o.v+'</b><i>奶茶</i>';
     return '<div class="rkr"><span class="rkno'+(rank<4?' medal':'')+'">'+medal(rank)+'</span>'+
       rkAva(o,"rkava")+
-      '<span class="rkname">'+o.n+'</span>'+lvTag(o.lv)+
+      '<span class="rkname">'+o.n+'</span>'+lvTag(o.lv,o.t)+
       '<span class="rkval">'+val+'</span></div>';
   }).join("");
 }
@@ -751,7 +755,7 @@ function renderMedal(){
   var ci=cur?cur.i-1:-1;
   var nxt=MEDALS[ci+1]||null;
   if($("mIco")) $("mIco").innerHTML = cur ? medalImg(cur.i) : "";
-  if($("mName")) $("mName").textContent = cur ? cur.name : "新人观众";
+  if($("mName")) $("mName").textContent = (String(D.ctitle||"").trim() || (cur ? cur.name : "新人观众"));
   if($("mSub")){
     var t=fmtH(total);
     $("mSub").textContent = nxt
@@ -1206,6 +1210,8 @@ setTimeout(fitTop,60);setTimeout(fitTop,300);
     var tot=D.watchTotal||0, lv=0, cur=null, next=null;
     for(var i=0;i<MEDALS.length;i++){ if(tot>=MEDALS[i].h){lv=MEDALS[i].i;cur=MEDALS[i];} else {next=MEDALS[i];break;} }
     if(!cur){cur={i:0,name:"新人观众",h:0};lv=0;next=MEDALS[0];}
+    var _ovf=Number(D.lvOverride||0);
+    if(_ovf>=1&&_ovf<=MEDALS.length){lv=_ovf;cur=MEDALS[_ovf-1];next=MEDALS[_ovf]||null;}
     var span=(next?next.h:cur.h)-(cur.h||0);
     var pct=next&&span>0?Math.min(100,Math.round((tot-cur.h)/span*100)):100;
     var hero=$("mdHero");
@@ -1213,7 +1219,7 @@ setTimeout(fitTop,60);setTimeout(fitTop,300);
       hero.innerHTML=
         '<div class="mdHeroMid">'+ (MC.medalImg?MC.medalImg(lv||1,"mdBig"):'') +
           '<div class="mdHtx">'+
-            '<div class="mdName">Lv'+(lv||0)+' · '+esc(cur.name)+'</div>'+
+            '<div class="mdName">Lv'+(lv||0)+' · '+esc(String(D.ctitle||'').trim()||cur.name)+'</div>'+
             '<div class="mdSub">累计观看 '+h1(tot)+' 小时'+
               (next?' · 距 <b>'+esc(next.name)+'</b> 还差 <b>'+h1(next.h-tot)+'</b> 小时':' · 已达最高等级')+'</div>'+
           '</div>'+

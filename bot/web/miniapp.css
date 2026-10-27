@@ -2139,13 +2139,13 @@ html.booting .skr{animation:none;background:rgba(12,68,124,.08)}
 .rdHint{padding:8px 2px 2px;font-size:10.5px;line-height:1.5;color:#8aa4bb}
 
 /* ===== 等级下方观影勋章 ===== */
-.wlvWrap{position:absolute;top:14px;right:13px;z-index:3;
-  display:flex;flex-direction:row;align-items:center;justify-content:center;gap:6px}
+.wlvWrap{position:absolute;top:13px;right:13px;z-index:3;
+  display:flex;flex-direction:column;align-items:center;justify-content:center;gap:6px}
 .wlvWrap .wlvPill{position:static;top:auto;right:auto;
   display:inline-flex;align-items:center;gap:4px;height:23px;min-width:0;padding:0 9px 0 7px}
 .wlvPill b{font-weight:900;letter-spacing:.5px}
 .wlvPill em{font-style:normal;font-weight:700;opacity:.9;letter-spacing:0}
-.wmedal{order:-1;width:23px;height:23px;flex:0 0 23px;display:flex;align-items:center;justify-content:center;
+.wmedal{width:31px;height:31px;flex:0 0 31px;display:flex;align-items:center;justify-content:center;
   pointer-events:none;filter:drop-shadow(0 3px 6px rgba(11,42,73,.22));
   opacity:0;transition:opacity .18s ease}
 .wmedal[data-lv]{opacity:1}

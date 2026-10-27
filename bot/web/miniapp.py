@@ -1044,6 +1044,7 @@ async def miniapp_rank(request: Request):
     # 头像：不在榜单请求里阻塞拉取（50 个 × 8s 会把接口拖死），
     # 只回懒加载地址，由 <img> 触发 /app/api/avatar 按需拉取并落盘
     _ovmap = _rk_lvov_all()
+    _tmap = _mm_titles_all()
     items = []
     for e in top:
         tg, v, emby_name, uid = e
@@ -1054,6 +1055,7 @@ async def miniapp_rank(request: Request):
             "n": nm,
             "av": _rk_av_url(tg),
             "lv": (_ovmap.get(tg) or _rk_lv(hours)),
+            "t": _tmap.get(tg) or "",
             "v": v,
         })
 
@@ -1974,6 +1976,22 @@ def _mm_sys_set(k, v):
 def _mm_title(tg):
     rows = _mm_rows("SELECT title FROM miniapp_title WHERE tg=:t LIMIT 1", t=int(tg))
     return (rows[0]["title"] if rows else "") or ""
+
+
+def _mm_titles_all():
+    """{tg: title} 全量自定义称号，一次查询，榜单用。"""
+    out = {}
+    try:
+        for r in _mm_rows("SELECT tg, title FROM miniapp_title"):
+            t = (r.get("title") or "").strip()
+            if t:
+                try:
+                    out[int(r["tg"])] = t
+                except Exception:
+                    pass
+    except Exception as exc:
+        LOGGER.warning(f"【MiniApp】自定义称号批量读取失败: {exc}")
+    return out
 
 
 @route.get("/api/mall", include_in_schema=False)
