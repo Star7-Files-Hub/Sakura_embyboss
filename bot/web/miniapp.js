@@ -234,8 +234,12 @@ function lvNameOf(n){for(var i=0;i<MEDALS.length;i++){if(MEDALS[i].i==n)return M
 function lvTag(lv,t){var auto=lvNameOf(lv),nm=String(t||"").trim()||auto;
   return '<i class="lvtag lv'+(lv>=7?"8":lv>=4?"3":"1")+'" title="Lv'+lv+(auto?' · '+auto:'')+(String(t||"").trim()?'（自定义）':'')+'"><b>Lv'+lv+'</b>'+(nm?'<em>· '+nm+'</em>':'')+'</i>';}
 function initials(n){
-  var t=String(n).replace(/[^\u4e00-\u9fa5A-Za-z0-9]/g,"");
-  return (t.slice(0,1)||"?").toUpperCase();
+  var raw=String(n==null?"":n).trim();
+  var t="";
+  try{ t=raw.normalize("NFKC").replace(/[^\u4e00-\u9fa5A-Za-z0-9]/g,""); }catch(e){ t=raw.replace(/[^\u4e00-\u9fa5A-Za-z0-9]/g,""); }
+  if(t) return t.slice(0,1).toUpperCase();
+  var cp=raw.codePointAt(0);
+  return cp?String.fromCodePoint(cp).toUpperCase():"?";
 }
 var __RK={}, rkBusy={}, RK_SEQ=0;
 function rkKey(){return board+"|"+(board==="point"?"all":span);}

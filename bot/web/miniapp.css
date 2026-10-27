@@ -2140,12 +2140,12 @@ html.booting .skr{animation:none;background:rgba(12,68,124,.08)}
 
 /* ===== 等级下方观影勋章 ===== */
 .wlvWrap{position:absolute;top:13px;right:13px;z-index:3;
-  display:flex;flex-direction:column;align-items:center;justify-content:center;gap:6px}
+  display:flex;flex-direction:column;align-items:center;justify-content:center;gap:3px}
 .wlvWrap .wlvPill{position:static;top:auto;right:auto;
   display:inline-flex;align-items:center;gap:4px;height:23px;min-width:0;padding:0 9px 0 7px}
 .wlvPill b{font-weight:900;letter-spacing:.5px}
 .wlvPill em{font-style:normal;font-weight:700;opacity:.9;letter-spacing:0}
-.wmedal{width:31px;height:31px;flex:0 0 31px;display:flex;align-items:center;justify-content:center;
+.wmedal{width:42px;height:42px;flex:0 0 42px;display:flex;align-items:center;justify-content:center;
   pointer-events:none;filter:drop-shadow(0 3px 6px rgba(11,42,73,.22));
   opacity:0;transition:opacity .18s ease}
 .wmedal[data-lv]{opacity:1}
@@ -2236,3 +2236,19 @@ html.booting .skr{animation:none;background:rgba(12,68,124,.08)}
 .rkno.medal{line-height:0;flex:0 0 22px}
 .rkno.medal svg{width:16px;height:16px;display:block;margin:0 auto}
 .hotCard .rkr.hr3 .rkno.medal svg{width:17px;height:17px}
+
+/* ===== 首页大卡：称号改为纯文字（去胶囊） ===== */
+.wlvWrap .wlvPill,.bigcard.b .wlvPill{
+  background:none!important;background-image:none!important;border:0!important;
+  box-shadow:none!important;-webkit-backdrop-filter:none!important;backdrop-filter:none!important;
+  text-shadow:0 1px 4px rgba(0,25,55,.35)!important;
+  height:auto!important;min-width:0!important;padding:0!important;
+  font-size:12.5px!important;font-weight:800!important;letter-spacing:0!important;
+  gap:5px!important;opacity:1}
+.bigcard.b .wlvPill{text-shadow:none!important}
+.wlvWrap .wlvPill b,.bigcard.b .wlvPill b{font-weight:900!important;letter-spacing:.4px!important}
+.wlvWrap .wlvPill em,.bigcard.b .wlvPill em{font-weight:700!important;opacity:.95!important}
+
+/* ===== 首页大卡：徽章在上、称号文字在下 ===== */
+.wlvWrap .wmedal,.bigcard.b .wmedal{order:-1!important;margin:0 0 1px!important}
+.wlvWrap .wlvPill,.bigcard.b .wlvPill{order:1!important}
